@@ -411,6 +411,12 @@ GameState GameStateProvider::get() {
     GameState gs{};
     static unsigned long s_poll = 0;
     ++s_poll;
+    // Sticky state across polls
+    static uint8_t s_lastGmRaw = 0xFF;
+    static std::string s_lastP1Name;
+    static std::string s_lastP2Name;
+    static bool s_offlineSuppressAssets = false; // after offline mode change until chars change
+    static bool s_waitOnlineNicknames = false;    // online reported but no nicknames yet
 
     // Determine module bases
     uintptr_t efzBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)); // main module (efz.exe) in same process
@@ -449,20 +455,37 @@ GameState GameStateProvider::get() {
 
     bool inMatch = !p1.empty() && !p2.empty();
 
+    // Detect offline mode changes and suppress character assets until they update once
+    if (onl == OnlineState::Offline || onl == OnlineState::Unknown) {
+        if (gmRaw != s_lastGmRaw) {
+            s_offlineSuppressAssets = true;
+        }
+        // If characters changed (both sides changed from previous and are non-empty), stop suppressing
+        if (s_offlineSuppressAssets) {
+            if ((!p1.empty() && p1 != s_lastP1Name) || (!p2.empty() && p2 != s_lastP2Name)) {
+                // Wait until we observe a non-empty change on either slot
+                s_offlineSuppressAssets = false;
+            }
+        }
+    } else {
+        // Not offline; reset suppression
+        s_offlineSuppressAssets = false;
+    }
+
     // Prefer EFZ game mode in offline/unknown online contexts
     const bool isReplay = (gmName && (std::string(gmName) == "Replay" || std::string(gmName) == "Auto-Replay"));
     if (onl == OnlineState::Offline || onl == OnlineState::Unknown) {
         // No constant label; details/state reflect activity directly
-        if (isReplay) {
+    if (isReplay) {
             gs.details = "Watching replay";
             gs.state = inMatch ? (p1 + " vs " + p2) : std::string("Loading replay");
             // Large: our character (P1), Small: opponent (P2)
-            if (!p1.empty()) {
+            if (!p1.empty() && !s_offlineSuppressAssets) {
                 std::string kL = map_char_to_large_image_key(p1);
                 if (!kL.empty()) { gs.largeImageKey = kL; gs.largeImageText = p1; }
             }
             // Small icon: opponent (P2) when available
-            if (!p2.empty()) {
+            if (!p2.empty() && !s_offlineSuppressAssets) {
                 std::string key = map_char_to_small_icon_key(p2);
                 if (!key.empty()) { gs.smallImageKey = key; gs.smallImageText = std::string("Against ") + p2; }
             }
@@ -477,30 +500,41 @@ GameState GameStateProvider::get() {
 
         if (inMatch) {
             gs.details = std::string("Playing in ") + mode;
-            gs.state = std::string("As ") + p1; // P1 perspective
+            // If we just changed modes, suppress showing stale character text until characters update
+            if (s_offlineSuppressAssets) {
+                gs.state.clear();
+            } else {
+                gs.state = std::string("As ") + p1; // P1 perspective
+            }
             // Large: our character (P1), Small: opponent (P2)
-            if (!p1.empty()) {
+            if (!p1.empty() && !s_offlineSuppressAssets) {
                 std::string kL = map_char_to_large_image_key(p1);
                 if (!kL.empty()) { gs.largeImageKey = kL; gs.largeImageText = p1; }
             }
             // Small icon: opponent (P2) when available
-            if (!p2.empty()) {
+            if (!p2.empty() && !s_offlineSuppressAssets) {
                 std::string key = map_char_to_small_icon_key(p2);
                 if (!key.empty()) { gs.smallImageKey = key; gs.smallImageText = std::string("Against ") + p2; }
             }
         } else {
             // Menu or pre-select
-            if (gmName && std::string(gmName) == "Arcade")
-                gs.details = "Main Menu";
-            else if (gmName)
+            // If offline mode changed, assume we left Main Menu and are at character select for that mode
+            if (s_offlineSuppressAssets && gmName) {
                 gs.details = std::string("Playing in ") + mode;
-            else
+            } else if ((p1.empty() && p2.empty()) || (gmName && std::string(gmName) == "Arcade")) {
+                // Heuristic: both characters empty -> Main Menu
+                gs.details = "Main Menu";
+            } else if (gmName) {
+                gs.details = std::string("Playing in ") + mode;
+            } else {
                 gs.details = "In Menus";
+            }
             gs.state.clear();
             // Use main icon on the Main Menu
             if (gs.details == "Main Menu") {
                 gs.largeImageKey = "efz_icon";
                 gs.largeImageText = "Main Menu";
+                gs.state = "The true Eternal does exist here";
                 gs.smallImageKey.clear();
                 gs.smallImageText.clear();
             } else {
@@ -509,7 +543,9 @@ GameState GameStateProvider::get() {
             }
         }
         log("GSPoll#%lu: offline -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
-        return gs;
+    // update last-seen names and mode before returning
+    s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw;
+    return gs;
     }
 
     // Only attempt EfzRevival reads when online/spectating/tournament
@@ -527,12 +563,41 @@ GameState GameStateProvider::get() {
     if (p2Wins < 0 || p2Wins > 99) p2Wins = 0;
     log("GSPoll#%lu: wins p1=%d p2=%d nicks p1='%s' p2='%s' selfIdx=%d", s_poll, p1Wins, p2Wins, p1Nick.c_str(), p2Nick.c_str(), selfIdx);
 
+    // Online nickname monitoring: if reported online but both nicknames are missing, keep monitoring
+    if (onl == OnlineState::Netplay || onl == OnlineState::Spectating || onl == OnlineState::Tournament) {
+        bool haveAnyNick = !p1Nick.empty() || !p2Nick.empty();
+        if (!haveAnyNick) {
+            s_waitOnlineNicknames = true;
+        } else {
+            s_waitOnlineNicknames = false;
+        }
+    } else {
+        s_waitOnlineNicknames = false;
+    }
+
     // ONLINE formatting (ignore gmName which often reads VS Human)
     std::string selfNick = (selfIdx == 0 ? p1Nick : selfIdx == 1 ? p2Nick : std::string());
     std::string oppNick = (selfIdx == 0 ? p2Nick : selfIdx == 1 ? p1Nick : std::string());
 
     // details: Playing/Watching online match (selfNick if known)
-    if (onl == OnlineState::Spectating) {
+    if (s_waitOnlineNicknames) {
+        // Treat as offline menus until nicknames show up or state changes
+        // Prefer Main Menu if both characters are empty
+        if (p1.empty() && p2.empty())
+            gs.details = "Main Menu";
+        else
+            gs.details = (gmName && std::string(gmName) == "Arcade") ? "Main Menu" : "In Menus";
+        gs.state.clear();
+        if (gs.details == "Main Menu") {
+            gs.largeImageKey = "efz_icon";
+            gs.largeImageText = "Main Menu";
+            gs.state = "The true Eternal does exist here";
+        }
+        // update last-seen names and mode and return
+        s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw;
+        log("GSPoll#%lu: online pending nicknames -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
+        return gs;
+    } else if (onl == OnlineState::Spectating) {
         gs.details = "Watching online match"; // spectator has no nickname in memory; omit parens
     } else if (onl == OnlineState::Tournament) {
         gs.details = std::string("Playing tournament match") + (selfNick.empty() ? "" : (" (" + selfNick + ")"));
@@ -581,6 +646,8 @@ GameState GameStateProvider::get() {
         gs.largeImageText = "Online Match";
     }
     log("GSPoll#%lu: online -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
+    // update last-seen names and mode before returning
+    s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw;
     return gs;
 }
 

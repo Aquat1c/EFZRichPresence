@@ -69,9 +69,6 @@ void worker_main(HMODULE hMod) {
     efzda::log("Stage: entering poll loop");
     OutputDebugStringW(L"[EfzRichPresence] Entering poll loop\n");
 
-    // Allow a brief stabilization so online/offline state is correct on first read
-    std::this_thread::sleep_for(500ms);
-
     while (g_running.load(std::memory_order_relaxed)) {
         try {
             auto cur = provider.get();
