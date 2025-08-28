@@ -1,0 +1,81 @@
+# C++ / CMake / MSVC / VS Code
+
+# Build output
+build/
+Build/
+out/
+Out/
+[Bb]uild*/
+[Oo]ut*/
+
+# CMake artifacts
+CMakeFiles/
+CMakeCache.txt
+CMakeScripts/
+CTestTestfile.cmake
+cmake_install.cmake
+install_manifest.txt
+Testing/
+.cmake/
+
+# MSVC/Linker artifacts
+*.obj
+*.o
+*.idb
+*.pdb
+*.ipch
+*.pch
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+*.manifest
+*.tlh
+*.tli
+*.lastbuildstate
+*.tlog
+*.log
+*.trace
+*.dmp
+
+# Visual Studio
+.vs/
+*.VC.db
+*.VC.VC.opendb
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Project-specific
+EfzRichPresence.log
+discord_app_id.txt
+out/
+.build/
+.vs/
+CMakeFiles/
+CMakeCache.txt
+*.user
+*.vcxproj*
+*.sln
+*.pdb
+*.obj
+*.ipch
+*.db
+*.log
+*.tlog
+*.opensdf
+*.sdf
+*.cache
+*.dll
+*.lib
+*.exp

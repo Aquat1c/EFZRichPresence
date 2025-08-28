@@ -1,0 +1,42 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "vs2022-x64",
+      "displayName": "VS 2022 x64",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}"
+      }
+    },
+    {
+      "name": "vs2022-Win32",
+      "displayName": "VS 2022 Win32 (x86)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "Win32",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "vs2022-x64",
+      "configurePreset": "vs2022-x64",
+      "configuration": "RelWithDebInfo",
+  "targets": [ "EfzRichPresence" ]
+    },
+    {
+      "name": "vs2022-Win32",
+      "configurePreset": "vs2022-Win32",
+      "configuration": "RelWithDebInfo",
+  "targets": [ "EfzRichPresence" ]
+    }
+  ],
+  "testPresets": []
+}
