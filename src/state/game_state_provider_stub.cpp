@@ -6,6 +6,7 @@
 #include <string>
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 #include <cctype>
 #include <type_traits>
 #include "logger.h"
@@ -230,9 +231,10 @@ static std::string normalize_display_name(const std::string& rawLower) {
         {"mio", "Mio Kouzuki"},
         {"ayu", "Ayu Tsukimiya"},
     // Nayuki variants per request
-    {"nayuki", "Nayuki(Sleepy)"},
-    {"nayukib", "Nayuki(Awake)"},
-    {"neyuki", "Nayuki(Sleepy)"},
+        {"nayuki", "Nayuki(Sleepy)"},
+        {"nayukib", "Nayuki(Awake)"},
+         {"neyuki", "Nayuki(Sleepy)"},
+         {"akiko", "Akiko Minase"},
         {"makoto", "Makoto Sawatari"},
         {"shiori", "Shiori Misaka"},
         {"kaori", "Kaori Misaka"},
@@ -265,6 +267,14 @@ static std::string read_character_name(uintptr_t base, uintptr_t baseOffset) {
     // Raw is typically lower-case; normalize for display
     std::string lower = s;
     std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+    // Validate raw against known EFZ character identifiers to avoid sticky/garbage names
+    static const std::unordered_set<std::string> kAllowedRaw = {
+        "akane","akiko","ayu","doppel","exnanase","nanase","ikumi","kanna","kano","kaori","mai","makoto","mayu","minagi","mio","misaki","mishio","misuzu","nagamori","nayuki","nayukib","mizuka","mizukab","sayuri","shiori"
+    };
+    if (lower.empty() || lower.size() < 3 || lower.size() > 12 || kAllowedRaw.find(lower) == kAllowedRaw.end()) {
+        efzda::log("[tick=%llu] CHAR name rejected as invalid/raw='%s'", ticks(), lower.c_str());
+        return {};
+    }
     auto disp = normalize_display_name(lower);
     efzda::log("[tick=%llu] CHAR name display='%s'", ticks(), disp.c_str());
     return disp;
@@ -345,42 +355,46 @@ static const char* online_state_name(OnlineState s) {
 
 // Map display character name to Discord small image asset key (Dev Portal)
 static std::string map_char_to_small_icon_key(const std::string& displayName) {
-    // Normalize to a tight lowercase key with no spaces/punct
-    std::string k; k.reserve(displayName.size());
-    for (unsigned char c : displayName) {
-        if (std::isalnum(c)) k.push_back((char)std::tolower(c));
+    // Lowercase copy
+    std::string s = displayName;
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return (char)std::tolower(c); });
+    // Extract first token (up to space or '(')
+    std::string first;
+    for (char c : s) {
+        if (c == ' ' || c == '(') break;
+        if ((c >= 'a' && c <= 'z')) first.push_back(c);
     }
-    // Handle Nayuki variants by explicit tag
-    if (k.find("nayukisleepy") != std::string::npos || k == "neyuki") return "90px-efz_neyuki_icon"; // Sleepy
-    if (k.find("nayukiawake") != std::string::npos || k == "nayuki") return "90px-efz_nayuki_icon";   // Awake
+    // Flags for Nayuki variants
+    bool isSleepy = s.find("(sleepy)") != std::string::npos;
 
-    // Doppel vs Rumi
-    if (k.find("doppelnanase") != std::string::npos || k == "doppel") return "90px-efz_doppel_icon";
-    if (k.find("nanase") != std::string::npos || k.find("rumi") != std::string::npos) return "90px-efz_rumi_icon";
+    // Exact first-name mapping only
+    if (first == "nayuki") return isSleepy ? "90px-efz_neyuki_icon" : "90px-efz_nayuki_icon";
+    if (first == "doppel") return "90px-efz_doppel_icon";
+    if (first == "rumi" || first == "nanase") return "90px-efz_rumi_icon";
+    if (first == "akane") return "90px-efz_akane_icon";
+    if (first == "akiko") return "90px-efz_akiko_icon";
+    if (first == "ayu")   return "90px-efz_ayu_icon";
+    if (first == "ikumi") return "90px-efz_ikumi_icon";
+    if (first == "kanna") return "90px-efz_kanna_icon_-_copy";
+    if (first == "kano")  return "90px-efz_kano_icon";
+    if (first == "kaori") return "90px-efz_kaori_icon";
+    if (first == "mai")   return "90px-efz_mai_icon";
+    if (first == "makoto")return "90px-efz_makoto_icon";
+    if (first == "mayu")  return "90px-efz_mayu_icon";
+    if (first == "minagi")return "90px-efz_minagi_icon";
+    if (first == "mio")   return "90px-efz_mio_icon";
+    if (first == "misaki")return "90px-efz_misaki_icon";
+    if (first == "mishio")return "90px-efz_mishio_icon";
+    if (first == "misuzu")return "90px-efz_misuzu_icon";
+    if (first == "mizuka")return "90px-efz_mizuka_icon"; // Mizuka Nagamori (not Unknown)
+    if (first == "sayuri")return "90px-efz_sayuri_icon";
+    if (first == "shiori")return "90px-efz_shiori_icon";
+    if (first == "unknown") return "90px-efz_unknown_icon";
 
-    // Straightforward first-name matches (and some surnames)
-    if (k.find("akane") != std::string::npos) return "90px-efz_akane_icon";
-    if (k.find("akiko") != std::string::npos) return "90px-efz_akiko_icon";
-    if (k.find("ayu")   != std::string::npos) return "90px-efz_ayu_icon";
-    if (k.find("ikumi") != std::string::npos) return "90px-efz_ikumi_icon";
-    if (k.find("kanna") != std::string::npos) return "90px-efz_kanna_icon_-_copy";
-    if (k.find("kano")  != std::string::npos) return "90px-efz_kano_icon";
-    if (k.find("kaori") != std::string::npos) return "90px-efz_kaori_icon";
-    if (k.find("mai")   != std::string::npos) return "90px-efz_mai_icon";
-    if (k.find("makoto")!= std::string::npos) return "90px-efz_makoto_icon";
-    if (k.find("mayu")  != std::string::npos) return "90px-efz_mayu_icon";
-    if (k.find("minagi")!= std::string::npos) return "90px-efz_minagi_icon";
-    if (k.find("mio")   != std::string::npos) return "90px-efz_mio_icon";
-    if (k.find("misaki")!= std::string::npos) return "90px-efz_misaki_icon";
-    if (k.find("mishio")!= std::string::npos) return "90px-efz_mishio_icon";
-    if (k.find("misuzu")!= std::string::npos) return "90px-efz_misuzu_icon";
-    if (k.find("nagamori") != std::string::npos) return "90px-efz_mizuka_icon";
-    if (k.find("sayuri")!= std::string::npos) return "90px-efz_sayuri_icon";
-    if (k.find("shiori")!= std::string::npos) return "90px-efz_shiori_icon";
-    if (k.find("mizuka")!= std::string::npos || k.find("mizukab") != std::string::npos) return "90px-efz_unknown_icon";
+    // Specific reads that map to the Unknown character
+    if (s == "unknown") return "90px-efz_unknown_icon";
+    if (s.find("mizukab") != std::string::npos || s == "mizuka") return "90px-efz_unknown_icon";
 
-    // Unknown fallback
-    if (k == "unknown") return "90px-efz_unknown_icon";
     return {};
 }
 
