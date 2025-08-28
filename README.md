@@ -59,7 +59,8 @@ cmake --build out/build/vs2022-Win32 --config RelWithDebInfo --target EfzRichPre
 	- Netplay: details “Playing online match (nickname)” if your nickname is known.
     ![Online pre-pick](docs/screenshots/online-pre-pick.png)
     ![Online match (scores, nicknames)](docs/screenshots/online-match.png)
-	- Tournament: details “Playing tournament match (nickname)”.
+	- Tournament: details “Playing tournament match (score)”.
+    ![Tournament match](docs/screenshots/tournament.png)
 	- Spectating: details “Watching online match”.
     ![Spectating](docs/screenshots/spectating.png)
 	- State: “Against <opponentChar> (oppNick) (you-them)”. If the opponent character can’t be read, shows “Against the <nickname> (you-them)” and omits the small icon.

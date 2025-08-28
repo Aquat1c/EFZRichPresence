@@ -872,26 +872,30 @@ GameState GameStateProvider::get() {
         gs.details = std::string("Playing online match") + (selfNick.empty() ? "" : (" (" + selfNick + ")"));
     }
 
-    // state: Prefer opponent character; if missing in Netplay and we have nickname, use "Against the <nickname>"
+    // state: Prefer opponent character; if missing but nickname exists, use "Against the <nickname>"; otherwise show waiting message
     const std::string& oppChar = (selfIdx == 1 ? p1 : p2); // if self is P2, opponent is P1; else default P2
     int ourWins = (selfIdx == 1 ? p2Wins : p1Wins);
     int theirWins = (selfIdx == 1 ? p1Wins : p2Wins);
-    std::string st;
-    st.reserve(64);
-    st += "Against ";
-    if (oppChar.empty() && onl == OnlineState::Netplay && !oppNick.empty()) {
-        // Fallback requested: "Against the <nickname>"
-        st += "the ";
-        st += oppNick;
+    if (oppChar.empty() && oppNick.empty()) {
+        gs.state = "Waiting for the opponent...";
     } else {
-        st += oppChar.empty() ? std::string("undefined") : oppChar;
-        if (!oppNick.empty()) {
-            st += " ("; st += oppNick; st += ")";
+        std::string st;
+        st.reserve(64);
+        st += "Against ";
+        if (oppChar.empty() && onl == OnlineState::Netplay && !oppNick.empty()) {
+            // Fallback requested: "Against the <nickname>"
+            st += "the ";
+            st += oppNick;
+        } else {
+            st += oppChar.empty() ? std::string("undefined") : oppChar;
+            if (!oppNick.empty()) {
+                st += " ("; st += oppNick; st += ")";
+            }
         }
+        // Always show current score, including 0-0 at match start
+        st += " (" + std::to_string(ourWins) + "-" + std::to_string(theirWins) + ")";
+        gs.state = st;
     }
-    // Always show current score, including 0-0 at match start
-    st += " (" + std::to_string(ourWins) + "-" + std::to_string(theirWins) + ")";
-    gs.state = st;
 
     std::string oppForIcon = oppChar;
     // If we fell back to nickname and not char, try not to set icon

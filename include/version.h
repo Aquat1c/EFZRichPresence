@@ -5,5 +5,5 @@
 #define EFZDA_VERSION_PATCH 0
 
 #ifndef EFZDA_VERSION
-#define EFZDA_VERSION "0.1.0"
+#define EFZDA_VERSION "1.0.0"
 #endif
