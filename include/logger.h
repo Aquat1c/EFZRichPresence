@@ -3,6 +3,12 @@
 
 namespace efzda {
 
+// Compile-time logging switch. Define EFZDA_ENABLE_LOGGING=1 in your build or
+// before including this header to enable logging; otherwise logging is disabled.
+#ifndef EFZDA_ENABLE_LOGGING
+#define EFZDA_ENABLE_LOGGING 0
+#endif
+
 // Initialize logger to write EternalFighterZero.log into moduleDir
 void init_logger(const std::wstring &moduleDir);
 void shutdown_logger();

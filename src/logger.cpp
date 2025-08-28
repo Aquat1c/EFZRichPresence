@@ -10,6 +10,8 @@
 #include <iostream>
 
 namespace efzda {
+
+#if EFZDA_ENABLE_LOGGING
 static std::wstring g_logPath;
 static std::mutex g_logMutex;
 static bool g_consoleEnabled = false;
@@ -148,5 +150,16 @@ void enable_console() {
         std::fflush(stdout);
     }
 }
+
+// When logging is disabled at compile time, provide no-op versions
+#else
+
+void init_logger(const std::wstring &) {}
+void shutdown_logger() {}
+void log(const char *, ...) {}
+void logw(const wchar_t *, ...) {}
+void enable_console() {}
+
+#endif // EFZDA_ENABLE_LOGGING
 
 } // namespace efzda
