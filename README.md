@@ -45,7 +45,7 @@ cmake --build out/build/vs2022-Win32 --config RelWithDebInfo --target EfzRichPre
 ## Installation
 - Place `EfzRichPresence.dll` in your EFZ mods folder (same place you put other EFZ Mod Manager DLLs)
 - Add this line to the bottom of `EfzModManager.ini`:
-  - `efz_training_mode=1`
+  - `EfzRichPresence=1`
   - EFZ Mod Manager download: [link](https://docs.google.com/spreadsheets/d/1r0nBAaQczj9K4RG5zAVV4uXperDeoSnXaqQBal2-8Us/edit?usp=sharing)
 ## Runtime behavior (details/state)
 
