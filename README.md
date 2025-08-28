@@ -51,18 +51,23 @@ cmake --build out/build/vs2022-Win32 --config RelWithDebInfo --target EfzRichPre
 
 - Offline
 	- Main Menu: details “Main Menu”; large image `efz_icon`.
-    ![Main menu](docs/screenshots/main-menu.png)
+
+	  ![Main menu](docs/screenshots/main-menu.png)
 	- Replay/Auto-Replay: details “Watching replay”; state “P1 vs P2”; large = P1 character; small = P2 character (tooltip: “Against <P2>”).
 	- Matches: details “Playing in <Mode>”; state “As <P1>”; large = your character; small = opponent.
-    ![Offline match](docs/screenshots/offline-match.png)
+
+	  ![Offline match](docs/screenshots/offline-match.png)
 - Online (EfzRevival)
 	- Netplay: details “Playing online match (nickname)” if your nickname is known.
-    ![Online pre-pick](docs/screenshots/online-pre-pick.png)
-    ![Online match (scores, nicknames)](docs/screenshots/online-match.png)
+
+	  ![Online pre-pick](docs/screenshots/online-pre-pick.png)
+	  ![Online match (scores, nicknames)](docs/screenshots/online-match.png)
 	- Tournament: details “Playing tournament match (score)”.
-    ![Tournament match](docs/screenshots/tournament.png)
+
+	  ![Tournament match](docs/screenshots/tournament.png)
 	- Spectating: details “Watching online match”.
-    ![Spectating](docs/screenshots/spectating.png)
+
+	  ![Spectating](docs/screenshots/spectating.png)
 	- State: “Against <opponentChar> (oppNick) (you-them)”. If the opponent character can’t be read, shows “Against the <nickname> (you-them)” and omits the small icon.
 	- Large image: your character; before you pick a character, large image is `210px-efzlogo`.
 
