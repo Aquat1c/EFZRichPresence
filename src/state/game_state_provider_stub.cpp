@@ -24,6 +24,13 @@ constexpr uintptr_t P1_WIN_COUNT_OFFSET = 0x4C8;
 constexpr uintptr_t P2_WIN_COUNT_OFFSET = 0x4CC;
 constexpr uintptr_t P1_WIN_COUNT_SPECTATOR_OFFSET = 0x80; // fallback
 constexpr uintptr_t P2_WIN_COUNT_SPECTATOR_OFFSET = 0x84; // fallback
+// Nicknames (wide strings) relative to same base pointer
+constexpr uintptr_t P1_NICKNAME_OFFSET = 0x3BE;
+constexpr uintptr_t P2_NICKNAME_OFFSET = 0x43E;
+constexpr uintptr_t P1_NICKNAME_SPECTATOR_OFFSET = 0x9A;
+constexpr uintptr_t P2_NICKNAME_SPECTATOR_OFFSET = 0x11A;
+// "Current player" index: 0 = P1, 1 = P2, relative to same base pointer
+constexpr uintptr_t CURRENT_PLAYER_OFFSET = 0x2A8;
 
 // From efz-training-mode
 constexpr uintptr_t GAME_MODE_OFFSET = 0x1364; // byte in game state struct
@@ -101,6 +108,90 @@ static std::string sanitize_ascii(const char* buf, size_t maxLen) {
         return c < 0x20 || c == 0x7F; // control chars
     }), s.end());
     return s;
+}
+
+// Narrow a UTF-16 string to UTF-8
+static std::string narrow(const std::wstring& w) {
+    if (w.empty()) return {};
+    int need = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string s(need > 0 ? need - 1 : 0, '\0');
+    if (need > 0) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), need, nullptr, nullptr);
+    return s;
+}
+
+// Simple nickname sanitization similar to efz_streaming
+static std::wstring sanitize_nickname_w(const std::wstring& in, size_t maxLen = 20) {
+    if (in.empty()) return L"";
+    const wchar_t* allowed = L" -_.!?+#@$%&*()[]{}:;<>,'\"\\|/~^";
+    std::wstring out;
+    out.reserve(in.size());
+    size_t count = 0;
+    for (wchar_t c : in) {
+        if (count >= maxLen) break;
+        bool ok = (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9');
+        if (!ok) {
+            for (const wchar_t* p = allowed; *p; ++p) { if (c == *p) { ok = true; break; } }
+        }
+        if (ok) { out.push_back(c); ++count; }
+        else {
+            if (out.empty() || out.back() != L'_') { out.push_back(L'_'); ++count; }
+        }
+    }
+    return out;
+}
+
+static bool read_wide_string(void* addr, size_t maxChars, std::wstring& out) {
+    if (!addr || maxChars == 0) return false;
+    SIZE_T bytes = 0;
+    std::wstring tmp;
+    tmp.resize(maxChars);
+    bool ok = (ReadProcessMemory(GetCurrentProcess(), addr, tmp.data(), maxChars * sizeof(wchar_t), &bytes) && bytes == maxChars * sizeof(wchar_t));
+    if (!ok) {
+        DWORD err = GetLastError();
+        efzda::log("[tick=%llu] READWIDE fail @%p chars=%zu read=%zu err=%lu", ticks(), addr, maxChars, (size_t)bytes, (unsigned long)err);
+        return false;
+    }
+    // trim at first null
+    size_t n = 0; while (n < tmp.size() && tmp[n] != L'\0') ++n;
+    tmp.resize(n);
+    out = tmp;
+    efzda::log("[tick=%llu] READWIDE ok @%p chars=%zu", ticks(), addr, n);
+    return true;
+}
+
+static uintptr_t read_revival_ptr(uintptr_t revivalBase) {
+    if (!revivalBase) return 0;
+    uintptr_t basePtrAddr = revivalBase + WIN_COUNT_BASE_OFFSET;
+    uintptr_t ptr = 0;
+    if (!safe_read(reinterpret_cast<void*>(basePtrAddr), ptr)) return 0;
+    return ptr;
+}
+
+static std::string read_nickname(uintptr_t revivalBase, uintptr_t primaryOff, uintptr_t spectatorOff) {
+    uintptr_t ptr = read_revival_ptr(revivalBase);
+    if (!ptr) return {};
+    std::wstring w;
+    // try primary (player) slot
+    if (read_wide_string(reinterpret_cast<void*>(ptr + primaryOff), 20, w) && !w.empty()) {
+        auto s = narrow(sanitize_nickname_w(w));
+        if (!s.empty() && s != "Player" && s != "Player 1" && s != "Player 2") return s;
+    }
+    // fallback spectator mapping
+    w.clear();
+    if (read_wide_string(reinterpret_cast<void*>(ptr + spectatorOff), 20, w) && !w.empty()) {
+        auto s = narrow(sanitize_nickname_w(w));
+        if (!s.empty()) return s;
+    }
+    return {};
+}
+
+static int read_current_player_index(uintptr_t revivalBase) {
+    uintptr_t ptr = read_revival_ptr(revivalBase);
+    if (!ptr) return -1;
+    int idx = -1;
+    if (!safe_read(reinterpret_cast<void*>(ptr + CURRENT_PLAYER_OFFSET), idx)) return -1;
+    if (idx == 0 || idx == 1) return idx;
+    return -1;
 }
 
 // Title-case helper
@@ -293,71 +384,89 @@ GameState GameStateProvider::get() {
     log("GSPoll#%lu: gameModeRaw=%u gameMode='%s' onlineState='%s'", s_poll, (unsigned)gmRaw, gmName ? gmName : "?", onlName ? onlName : "?");
 
     bool inMatch = !p1.empty() && !p2.empty();
-    if (!inMatch) {
-        gs.details = "Idle";
-        // Special-case: Arcade with no characters selected means Main Menu
-        if (gmName && std::string(gmName) == "Arcade") {
-            gs.state = "Main Menu";
+
+    // Prefer EFZ game mode in offline/unknown online contexts
+    const bool isReplay = (gmName && (std::string(gmName) == "Replay" || std::string(gmName) == "Auto-Replay"));
+    if (onl == OnlineState::Offline || onl == OnlineState::Unknown) {
+        gs.details = "Eternal Fighter Zero"; // constant label
+
+        if (isReplay) {
+            gs.details = "Watching replay";
+            gs.state = inMatch ? (p1 + " vs " + p2) : std::string("Loading replay");
+            log("GSPoll#%lu: offline replay -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
             return gs;
         }
 
-        std::string st;
-        // If in Replay modes, prefer that label over online/offline
-        if (gmName && (std::string(gmName) == "Replay" || std::string(gmName) == "Auto-Replay")) {
-            st = gmName;
+        // Not replay: Playing in <Mode> (P1)
+        std::string mode = gmName ? gmName : "";
+        if (mode == "Arcade" || mode == "Practice") mode += " Mode";
+        if (mode.empty()) mode = "Game";
+
+        if (inMatch) {
+            gs.state = std::string("Playing in ") + mode + " (" + p1 + ")"; // P1 perspective
         } else {
-            if (onlName) {
-                st += onlName; // Netplay/Spectating/Offline/Tournament
-            } else {
-                st += "Offline"; // Default safe fallback
-            }
-            if (gmName) {
-                st += " • ";
-                st += gmName;
-            }
+            // Menu or pre-select
+            if (gmName && std::string(gmName) == "Arcade")
+                gs.state = "Main Menu";
+            else if (gmName)
+                gs.state = std::string("Playing in ") + mode;
+            else
+                gs.state = "In Menus";
         }
-    gs.state = st;
-    log("GSPoll#%lu: not in match -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
+        log("GSPoll#%lu: offline -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
         return gs;
     }
 
-    // Only attempt EfzRevival win reads when online/spectating/tournament
+    // Only attempt EfzRevival reads when online/spectating/tournament
     int p1Wins = 0, p2Wins = 0;
+    std::string p1Nick, p2Nick;
+    int selfIdx = -1; // 0=P1, 1=P2, -1 unknown
     if (onl == OnlineState::Netplay || onl == OnlineState::Spectating || onl == OnlineState::Tournament) {
         p1Wins = read_win_count(revivalBase, P1_WIN_COUNT_OFFSET, P1_WIN_COUNT_SPECTATOR_OFFSET);
         p2Wins = read_win_count(revivalBase, P2_WIN_COUNT_OFFSET, P2_WIN_COUNT_SPECTATOR_OFFSET);
+        p1Nick = read_nickname(revivalBase, P1_NICKNAME_OFFSET, P1_NICKNAME_SPECTATOR_OFFSET);
+        p2Nick = read_nickname(revivalBase, P2_NICKNAME_OFFSET, P2_NICKNAME_SPECTATOR_OFFSET);
+        selfIdx = read_current_player_index(revivalBase);
     }
     if (p1Wins < 0 || p1Wins > 99) p1Wins = 0;
     if (p2Wins < 0 || p2Wins > 99) p2Wins = 0;
-    log("GSPoll#%lu: wins p1=%d p2=%d", s_poll, p1Wins, p2Wins);
+    log("GSPoll#%lu: wins p1=%d p2=%d nicks p1='%s' p2='%s' selfIdx=%d", s_poll, p1Wins, p2Wins, p1Nick.c_str(), p2Nick.c_str(), selfIdx);
 
-    // Build strings
-    gs.details = p1 + " vs " + p2;
-    if (p1Wins > 0 || p2Wins > 0) {
-        gs.details += " (" + std::to_string(p1Wins) + "-" + std::to_string(p2Wins) + ")";
+    // ONLINE formatting (ignore gmName which often reads VS Human)
+    std::string selfNick = (selfIdx == 0 ? p1Nick : selfIdx == 1 ? p2Nick : std::string());
+    std::string oppNick = (selfIdx == 0 ? p2Nick : selfIdx == 1 ? p1Nick : std::string());
+
+    // details: Playing/Watching online match (selfNick if known)
+    if (onl == OnlineState::Spectating) {
+        gs.details = "Watching online match"; // spectator has no nickname in memory; omit parens
+    } else if (onl == OnlineState::Tournament) {
+        gs.details = std::string("Playing tournament match") + (selfNick.empty() ? "" : (" (" + selfNick + ")"));
+    } else {
+        gs.details = std::string("Playing online match") + (selfNick.empty() ? "" : (" (" + selfNick + ")"));
     }
 
-    {
-        std::string st;
-        // If in Replay modes, override label regardless of online state
-        if (gmName && (std::string(gmName) == "Replay" || std::string(gmName) == "Auto-Replay")) {
-            st = gmName;
-        } else {
-            switch (onl) {
-                case OnlineState::Netplay: st = "Online Match"; break;
-                case OnlineState::Spectating: st = "Spectating"; break;
-                case OnlineState::Offline: st = "Offline Match"; break;
-                case OnlineState::Tournament: st = "Tournament Match"; break;
-                default: st = "Match"; break;
-            }
-            if (gmName) {
-                st += " • ";
-                st += gmName;
-            }
+    // state: Prefer opponent character; if missing in Netplay and we have nickname, use "Against the <nickname>"
+    const std::string& oppChar = (selfIdx == 1 ? p1 : p2); // if self is P2, opponent is P1; else default P2
+    int ourWins = (selfIdx == 1 ? p2Wins : p1Wins);
+    int theirWins = (selfIdx == 1 ? p1Wins : p2Wins);
+    std::string st;
+    st.reserve(64);
+    st += "Against ";
+    if (oppChar.empty() && onl == OnlineState::Netplay && !oppNick.empty()) {
+        // Fallback requested: "Against the <nickname>"
+        st += "the ";
+        st += oppNick;
+    } else {
+        st += oppChar.empty() ? std::string("Unknown") : oppChar;
+        if (!oppNick.empty()) {
+            st += " ("; st += oppNick; st += ")";
         }
-    gs.state = st;
-    log("GSPoll#%lu: in match -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
     }
+    if (ourWins > 0 || theirWins > 0) {
+        st += " (" + std::to_string(ourWins) + "-" + std::to_string(theirWins) + ")";
+    }
+    gs.state = st;
+    log("GSPoll#%lu: online -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
     return gs;
 }
 
