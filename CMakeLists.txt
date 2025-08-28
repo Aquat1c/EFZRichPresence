@@ -11,6 +11,15 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Ensure MSVC runtime selection via CMake property is honored
+if (MSVC)
+    # Use static runtime by default: /MT (Release) and /MTd (Debug)
+    if (POLICY CMP0091)
+        cmake_policy(SET CMP0091 NEW)
+    endif()
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 # Output directories
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -60,6 +69,11 @@ set_target_properties(EfzRichPresence PROPERTIES
 if (MSVC)
     set_property(TARGET EfzRichPresence PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    # Enforce static runtime: fail configure if anything changes this to DLL
+    get_property(_efzda_rt TARGET EfzRichPresence PROPERTY MSVC_RUNTIME_LIBRARY)
+    if (NOT _efzda_rt MATCHES "^MultiThreaded")
+        message(FATAL_ERROR "EfzRichPresence must link the static MSVC runtime (/MT,/MTd). Found '${_efzda_rt}'.")
+    endif()
 endif()
 
 # Console window option to match other mods
