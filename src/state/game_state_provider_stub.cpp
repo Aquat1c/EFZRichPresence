@@ -9,6 +9,7 @@
 #include <unordered_set>
 #include <cctype>
 #include <type_traits>
+#include <cstdio>
 #include "logger.h"
 
 namespace efzda {
@@ -18,6 +19,8 @@ namespace {
 constexpr uintptr_t EFZ_BASE_OFFSET_P1 = 0x390104;
 constexpr uintptr_t EFZ_BASE_OFFSET_P2 = 0x390108;
 constexpr uintptr_t EFZ_BASE_OFFSET_GAME_STATE = 0x39010C;
+// Global active-screen index (byte_790148) from efz.exe.c: absolute 0x00790148 -> base offset 0x390148
+constexpr uintptr_t EFZ_GLOBAL_SCREEN_INDEX_OFFSET = 0x390148; // byte: current UI state index
 constexpr uintptr_t CHARACTER_NAME_OFFSET = 0x94;
 
 constexpr uintptr_t WIN_COUNT_BASE_OFFSET = 0xA02CC; // in EfzRevival.dll
@@ -38,7 +41,14 @@ constexpr uintptr_t GAME_MODE_OFFSET = 0x1364; // byte in game state struct
 constexpr uintptr_t REVIVAL_ONLINE_STATE_OFFSET = 0xA05D0; // int in EfzRevival.dll
 
 static inline unsigned long long ticks() { return GetTickCount64(); }
+// Silent memory read (no logging), for probing purposes
+static bool read_bytes_no_log(const void* addr, void* buffer, size_t size) {
+    SIZE_T read = 0;
+    if (!addr || !buffer || size == 0) return false;
+    return ReadProcessMemory(GetCurrentProcess(), addr, buffer, size, &read) && read == size;
+}
 
+// Hex dump helper used by safe_read logging
 static std::string hex_bytes(const void* data, size_t size, size_t maxOut = 16) {
     const unsigned char* p = reinterpret_cast<const unsigned char*>(data);
     size_t n = size;
@@ -55,6 +65,7 @@ static std::string hex_bytes(const void* data, size_t size, size_t maxOut = 16) 
     return out;
 }
 
+// Generic safe_read template must be visible before first use
 template <typename T>
 bool safe_read(const void* addr, T& out) {
     SIZE_T read = 0;
@@ -89,6 +100,116 @@ bool safe_read_bytes(const void* addr, void* buffer, size_t size) {
         efzda::log("[tick=%llu] READBYTES fail @%p size=%zu read=%zu err=%lu", ticks(), addr, size, (size_t)read, (unsigned long)err);
         return false;
     }
+}
+
+static uintptr_t get_game_state_ptr(uintptr_t efzBase) {
+    if (!efzBase) return 0;
+    uintptr_t gameStatePtr = 0;
+    if (!safe_read(reinterpret_cast<void*>(efzBase + EFZ_BASE_OFFSET_GAME_STATE), gameStatePtr)) return 0;
+    return gameStatePtr;
+}
+
+static void probe_game_state_region(uintptr_t gameStatePtr) {
+    if (!gameStatePtr) return;
+    // Dump a small window around GAME_MODE_OFFSET to help identify scene/menu flags
+    const size_t start = (GAME_MODE_OFFSET > 0x80) ? (GAME_MODE_OFFSET - 0x80) : 0;
+    const size_t span = 0x140; // 320 bytes window
+    unsigned char buf[0x200] = {};
+    size_t toRead = span < sizeof(buf) ? span : sizeof(buf);
+    if (!read_bytes_no_log(reinterpret_cast<void*>(gameStatePtr + start), buf, toRead)) return;
+    // Print 16 bytes per line
+    for (size_t i = 0; i < toRead; i += 16) {
+        char line[128];
+        int n = std::snprintf(line, sizeof(line), "[probe] gs+0x%04zX:", start + i);
+        std::string out(line, line + (n > 0 ? (size_t)n : 0));
+        for (size_t j = 0; j < 16 && i + j < toRead; ++j) {
+            char b[4];
+            std::snprintf(b, sizeof(b), " %02X", buf[i + j]);
+            out += b;
+        }
+        efzda::log("%s", out.c_str());
+    }
+}
+
+// Optional scene-based detection (offline only). Configure via environment:
+// EFZDA_SCENE_OFFSET   = hex offset within game state struct (e.g., 0x135C)
+// EFZDA_SCENE_MAINMENU = integer value for main menu scene
+// EFZDA_SCENE_CHARSEL  = integer value for character select scene
+static bool s_sceneCfgInit = false;
+static uintptr_t s_sceneOffset = 0;
+static int s_sceneMainMenu = -1;
+static int s_sceneCharSel = -1;
+// Prefer global screen index by default; can be disabled via EFZDA_USE_SCREEN_INDEX=0
+static bool s_useGlobalScreen = true; // prefer global screen index over scene byte in game-state
+// Defaults from Cheat Engine observations: 0=Title,1=CharSel,2=Loading,3=InGame,5=Win,6=Settings,8=Replay menu
+static int s_screenTitle = 0;
+static int s_screenCharSel = 1;
+static int s_screenLoading = 2;
+static int s_screenInGame = 3;
+static int s_screenWin = 5;
+static int s_screenSettings = 6;
+static int s_screenReplayMenu = 8;
+
+static void maybe_init_scene_cfg() {
+    if (s_sceneCfgInit) return;
+    s_sceneCfgInit = true;
+    wchar_t buf[32];
+    DWORD n;
+    // Toggle to use global active-screen index (byte_790148) — default is ON; set to 0 to disable
+    n = GetEnvironmentVariableW(L"EFZDA_USE_SCREEN_INDEX", buf, _countof(buf));
+    if (n > 0) { s_useGlobalScreen = (wcstol(buf, nullptr, 0) != 0); }
+    n = GetEnvironmentVariableW(L"EFZDA_SCENE_OFFSET", buf, _countof(buf));
+    if (n > 0) {
+        wchar_t* end = nullptr;
+        unsigned long v = wcstoul(buf, &end, 0); // accepts 0x..
+        if (v > 0 && v < 0x10000) s_sceneOffset = (uintptr_t)v;
+    }
+    n = GetEnvironmentVariableW(L"EFZDA_SCENE_MAINMENU", buf, _countof(buf));
+    if (n > 0) {
+        s_sceneMainMenu = (int)wcstol(buf, nullptr, 0);
+    }
+    n = GetEnvironmentVariableW(L"EFZDA_SCENE_CHARSEL", buf, _countof(buf));
+    if (n > 0) {
+        s_sceneCharSel = (int)wcstol(buf, nullptr, 0);
+    }
+    // Optional explicit mappings for the global screen index
+    n = GetEnvironmentVariableW(L"EFZDA_SCREEN_TITLE", buf, _countof(buf));
+    if (n > 0) s_screenTitle = (int)wcstol(buf, nullptr, 0);
+    n = GetEnvironmentVariableW(L"EFZDA_SCREEN_CHARSEL", buf, _countof(buf));
+    if (n > 0) s_screenCharSel = (int)wcstol(buf, nullptr, 0);
+    n = GetEnvironmentVariableW(L"EFZDA_SCREEN_LOADING", buf, _countof(buf));
+    if (n > 0) s_screenLoading = (int)wcstol(buf, nullptr, 0);
+    n = GetEnvironmentVariableW(L"EFZDA_SCREEN_INGAME", buf, _countof(buf));
+    if (n > 0) s_screenInGame = (int)wcstol(buf, nullptr, 0);
+    n = GetEnvironmentVariableW(L"EFZDA_SCREEN_WIN", buf, _countof(buf));
+    if (n > 0) s_screenWin = (int)wcstol(buf, nullptr, 0);
+    n = GetEnvironmentVariableW(L"EFZDA_SCREEN_SETTINGS", buf, _countof(buf));
+    if (n > 0) s_screenSettings = (int)wcstol(buf, nullptr, 0);
+    n = GetEnvironmentVariableW(L"EFZDA_SCREEN_REPLAY_MENU", buf, _countof(buf));
+    if (n > 0) s_screenReplayMenu = (int)wcstol(buf, nullptr, 0);
+}
+
+static bool read_scene_value(uintptr_t efzBase, uint8_t& outVal) {
+    maybe_init_scene_cfg();
+    if (!s_sceneOffset) return false;
+    uintptr_t gsp = get_game_state_ptr(efzBase);
+    if (!gsp) return false;
+    return safe_read(reinterpret_cast<void*>(gsp + s_sceneOffset), outVal);
+}
+
+// Read the global active-screen index (not part of game-state struct), if enabled
+static bool read_screen_index(uintptr_t efzBase, uint8_t& outVal) {
+    maybe_init_scene_cfg();
+    if (!s_useGlobalScreen || !efzBase) return false;
+    uint8_t v = 0xFF;
+    if (!safe_read(reinterpret_cast<void*>(efzBase + EFZ_GLOBAL_SCREEN_INDEX_OFFSET), v)) return false;
+    outVal = v;
+    static uint8_t s_lastLogged = 0xFF;
+    if (outVal != s_lastLogged) {
+        s_lastLogged = outVal;
+        efzda::log("[tick=%llu] SCREEN index addr=%p val=%u", ticks(), (void*)(efzBase + EFZ_GLOBAL_SCREEN_INDEX_OFFSET), (unsigned)outVal);
+    }
+    return true;
 }
 
 std::wstring widen(const std::string& s) {
@@ -415,7 +536,11 @@ GameState GameStateProvider::get() {
     static uint8_t s_lastGmRaw = 0xFF;
     static std::string s_lastP1Name;
     static std::string s_lastP2Name;
-    static bool s_offlineSuppressAssets = false; // after offline mode change until chars change
+    static uint8_t s_lastScreenIdx = 0xFF; // track screen transitions (Title/Charsel/etc.)
+    // We now update presence immediately on mode change and update each character as soon as it becomes available (no global suppression)
+    // Simple debounced spawn heuristic inspired by efz-training-mode
+    static int s_spawnedFrames = 0;
+    static int s_unspawnedFrames = 0;
     static bool s_waitOnlineNicknames = false;    // online reported but no nicknames yet
 
     // Determine module bases
@@ -436,8 +561,30 @@ GameState GameStateProvider::get() {
         return gs;
     }
 
+    // Read current screen index early to detect transitions (e.g., 1->0 means back to Title)
+    uint8_t topScreenIdx = 0xFF; bool haveTopScreen = read_screen_index(efzBase, topScreenIdx);
+    if (haveTopScreen && topScreenIdx != s_lastScreenIdx) {
+        // On entering Title/Main Menu or Character Select, clear stale names and spawn debounce immediately
+        if (topScreenIdx == (uint8_t)s_screenTitle || topScreenIdx == (uint8_t)s_screenCharSel) {
+            s_lastP1Name.clear(); s_lastP2Name.clear();
+            s_spawnedFrames = 0; s_unspawnedFrames = 0;
+        }
+        s_lastScreenIdx = topScreenIdx;
+    }
+
     std::string p1 = read_character_name(efzBase, EFZ_BASE_OFFSET_P1);
     std::string p2 = read_character_name(efzBase, EFZ_BASE_OFFSET_P2);
+    // Also read raw character pointers to detect spawn state independently of name parsing
+    uintptr_t p1Ptr = 0, p2Ptr = 0;
+    safe_read(reinterpret_cast<void*>(efzBase + EFZ_BASE_OFFSET_P1), p1Ptr);
+    safe_read(reinterpret_cast<void*>(efzBase + EFZ_BASE_OFFSET_P2), p2Ptr);
+    bool rawSpawned = (p1Ptr != 0) && (p2Ptr != 0);
+    if (rawSpawned) {
+        int inc = s_spawnedFrames + 1; s_spawnedFrames = (inc > 60 ? 60 : inc); s_unspawnedFrames = 0;
+    } else {
+        int inc = s_unspawnedFrames + 1; s_unspawnedFrames = (inc > 60 ? 60 : inc); s_spawnedFrames = 0;
+    }
+    bool spawnedDebounced = (s_spawnedFrames >= 3);
     if (p1.size() > 32) p1.resize(32);
     if (p2.size() > 32) p2.resize(32);
     if (p1.empty() || p2.empty()) {
@@ -450,27 +597,34 @@ GameState GameStateProvider::get() {
     uint8_t gmRaw = read_game_mode(efzBase);
     const char* gmName = game_mode_name(gmRaw);
     OnlineState onl = read_online_state(revivalBase);
+    // Optional probe: EFZDA_MENU_PROBE=1 dumps a window of the game state struct for reverse engineering
+    static bool s_probeChecked = false;
+    static bool s_probeEnabled = false;
+    if (!s_probeChecked) {
+        wchar_t env[4];
+        s_probeEnabled = GetEnvironmentVariableW(L"EFZDA_MENU_PROBE", env, _countof(env)) > 0;
+        s_probeChecked = true;
+    }
+    if (s_probeEnabled && (onl == OnlineState::Offline || onl == OnlineState::Unknown)) {
+        if (uintptr_t gsp = get_game_state_ptr(efzBase)) probe_game_state_region(gsp);
+    }
     const char* onlName = online_state_name(onl);
     log("GSPoll#%lu: gameModeRaw=%u gameMode='%s' onlineState='%s'", s_poll, (unsigned)gmRaw, gmName ? gmName : "?", onlName ? onlName : "?");
+    // If the EFZ game mode changed (offline/unknown), treat it as a transition from main menu to a pre-match flow (char-select)
+    bool justChangedMode = false;
+    if ((onl == OnlineState::Offline || onl == OnlineState::Unknown) && s_lastGmRaw != gmRaw) {
+        justChangedMode = true;
+        // Clear last-seen names and reset spawn debounce so we don't carry stale characters/icons
+        s_lastP1Name.clear();
+        s_lastP2Name.clear();
+        s_spawnedFrames = 0;
+        s_unspawnedFrames = 0;
+        log("GSPoll#%lu: detected game mode change -> entering char-select flow", s_poll);
+    }
 
     bool inMatch = !p1.empty() && !p2.empty();
 
-    // Detect offline mode changes and suppress character assets until they update once
-    if (onl == OnlineState::Offline || onl == OnlineState::Unknown) {
-        if (gmRaw != s_lastGmRaw) {
-            s_offlineSuppressAssets = true;
-        }
-        // If characters changed (both sides changed from previous and are non-empty), stop suppressing
-        if (s_offlineSuppressAssets) {
-            if ((!p1.empty() && p1 != s_lastP1Name) || (!p2.empty() && p2 != s_lastP2Name)) {
-                // Wait until we observe a non-empty change on either slot
-                s_offlineSuppressAssets = false;
-            }
-        }
-    } else {
-        // Not offline; reset suppression
-        s_offlineSuppressAssets = false;
-    }
+    // No offline suppression: we will show available characters incrementally like netplay
 
     // Prefer EFZ game mode in offline/unknown online contexts
     const bool isReplay = (gmName && (std::string(gmName) == "Replay" || std::string(gmName) == "Auto-Replay"));
@@ -480,12 +634,12 @@ GameState GameStateProvider::get() {
             gs.details = "Watching replay";
             gs.state = inMatch ? (p1 + " vs " + p2) : std::string("Loading replay");
             // Large: our character (P1), Small: opponent (P2)
-            if (!p1.empty() && !s_offlineSuppressAssets) {
+            if (!p1.empty()) {
                 std::string kL = map_char_to_large_image_key(p1);
                 if (!kL.empty()) { gs.largeImageKey = kL; gs.largeImageText = p1; }
             }
             // Small icon: opponent (P2) when available
-            if (!p2.empty() && !s_offlineSuppressAssets) {
+            if (!p2.empty()) {
                 std::string key = map_char_to_small_icon_key(p2);
                 if (!key.empty()) { gs.smallImageKey = key; gs.smallImageText = std::string("Against ") + p2; }
             }
@@ -493,54 +647,148 @@ GameState GameStateProvider::get() {
             return gs;
         }
 
-        // Not replay: Playing in <Mode> (P1)
-        std::string mode = gmName ? gmName : "";
-        if (mode == "Arcade" || mode == "Practice") mode += " Mode";
-        if (mode.empty()) mode = "Game";
+    // Not replay: Playing in <Mode> (P1)
+    // Keep raw mode (as read) for logic, and a prettified label for display
+    std::string rawMode = gmName ? gmName : "";
+    std::string prettyMode = rawMode;
+    if (prettyMode == "Arcade" || prettyMode == "Practice") prettyMode += " Mode";
+    if (prettyMode.empty()) prettyMode = "Game";
 
         if (inMatch) {
-            gs.details = std::string("Playing in ") + mode;
-            // If we just changed modes, suppress showing stale character text until characters update
-            if (s_offlineSuppressAssets) {
-                gs.state.clear();
-            } else {
-                gs.state = std::string("As ") + p1; // P1 perspective
-            }
+            gs.details = std::string("Playing in ") + prettyMode;
+            // Always show current P1 when known; update incrementally
+            gs.state = std::string("As ") + p1; // P1 perspective
             // Large: our character (P1), Small: opponent (P2)
-            if (!p1.empty() && !s_offlineSuppressAssets) {
+            if (!p1.empty()) {
                 std::string kL = map_char_to_large_image_key(p1);
                 if (!kL.empty()) { gs.largeImageKey = kL; gs.largeImageText = p1; }
             }
             // Small icon: opponent (P2) when available
-            if (!p2.empty() && !s_offlineSuppressAssets) {
+            if (!p2.empty()) {
                 std::string key = map_char_to_small_icon_key(p2);
                 if (!key.empty()) { gs.smallImageKey = key; gs.smallImageText = std::string("Against ") + p2; }
             }
         } else {
-            // Menu or pre-select
-            // If offline mode changed, assume we left Main Menu and are at character select for that mode
-            if (s_offlineSuppressAssets && gmName) {
-                gs.details = std::string("Playing in ") + mode;
-            } else if ((p1.empty() && p2.empty()) || (gmName && std::string(gmName) == "Arcade")) {
-                // Heuristic: both characters empty -> Main Menu
+        // Menus or pre-select: prefer deterministic screen-index mapping, else fallback
+        uint8_t screenIdx = 0xFF;
+        bool haveScreen = false;
+        if (haveTopScreen) { screenIdx = topScreenIdx; haveScreen = true; }
+        else { haveScreen = read_screen_index(efzBase, screenIdx); }
+            if (haveScreen) {
+                if (s_screenTitle >= 0 && screenIdx == (uint8_t)s_screenTitle) {
+                    gs.details = "Main Menu";
+                    gs.state.clear();
+                    gs.largeImageKey = "efz_icon"; gs.largeImageText = "Main Menu";
+                    gs.state = "The true Eternal does exist here";
+                    gs.smallImageKey.clear(); gs.smallImageText.clear();
+                    log("GSPoll#%lu: offline(screen=%u) -> details='%s' state='%s'", s_poll, (unsigned)screenIdx, gs.details.c_str(), gs.state.c_str());
+            if (haveScreen) s_lastScreenIdx = screenIdx;
+            s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw; return gs;
+                }
+                if (s_screenSettings >= 0 && screenIdx == (uint8_t)s_screenSettings) {
+                    gs.details = "Options";
+            gs.state.clear();
+                    gs.largeImageKey = "efz_icon"; gs.largeImageText = "Options";
+                    gs.smallImageKey.clear(); gs.smallImageText.clear();
+                    log("GSPoll#%lu: offline(screen=%u) -> details='%s' state='%s'", s_poll, (unsigned)screenIdx, gs.details.c_str(), gs.state.c_str());
+            if (haveScreen) s_lastScreenIdx = screenIdx;
+            s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw; return gs;
+                }
+                if (s_screenReplayMenu >= 0 && screenIdx == (uint8_t)s_screenReplayMenu) {
+            gs.details = "Replay Selection";
+            gs.state = "Selecting replay";
+            // Clear icons to avoid leftovers
+            gs.largeImageKey.clear(); gs.largeImageText.clear();
+            gs.smallImageKey.clear(); gs.smallImageText.clear();
+                    log("GSPoll#%lu: offline(screen=%u) -> details='%s' state='%s'", s_poll, (unsigned)screenIdx, gs.details.c_str(), gs.state.c_str());
+            if (haveScreen) s_lastScreenIdx = screenIdx;
+            s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw; return gs;
+                }
+                if (s_screenCharSel >= 0 && screenIdx == (uint8_t)s_screenCharSel) {
+                    // Char-select: show current mode as activity; no icons until selection happens
+                    gs.details = std::string("Playing in ") + prettyMode;
+                    // Show picks incrementally if available, but don't rely on them
+            gs.state.clear();
+            // Clear icons first to avoid stale assets
+            gs.largeImageKey.clear(); gs.largeImageText.clear();
+            gs.smallImageKey.clear(); gs.smallImageText.clear();
+                    if (!p1.empty()) {
+                        gs.state = std::string("As ") + p1;
+                        std::string kL = map_char_to_large_image_key(p1);
+                        if (!kL.empty()) { gs.largeImageKey = kL; gs.largeImageText = p1; }
+                    }
+                    if (!p2.empty()) {
+                        std::string key = map_char_to_small_icon_key(p2);
+                        if (!key.empty()) { gs.smallImageKey = key; gs.smallImageText = std::string("Against ") + p2; }
+                        if (gs.state.empty() && !p1.empty()) {
+                            // If we somehow have P2 first, still show incremental
+                            gs.state = std::string("As ") + p1;
+                        }
+                    }
+                    log("GSPoll#%lu: offline(screen=%u) -> details='%s' state='%s'", s_poll, (unsigned)screenIdx, gs.details.c_str(), gs.state.c_str());
+            if (haveScreen) s_lastScreenIdx = screenIdx;
+            s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw; return gs;
+                }
+                if (s_screenLoading >= 0 && screenIdx == (uint8_t)s_screenLoading) {
+            gs.details = std::string("Loading") + (prettyMode.empty() ? "" : (" - " + prettyMode));
+            gs.state = "Loading";
+            // Clear icons during loading to avoid stale display
+            gs.largeImageKey.clear(); gs.largeImageText.clear();
+            gs.smallImageKey.clear(); gs.smallImageText.clear();
+                    log("GSPoll#%lu: offline(screen=%u) -> details='%s' state='%s'", s_poll, (unsigned)screenIdx, gs.details.c_str(), gs.state.c_str());
+            if (haveScreen) s_lastScreenIdx = screenIdx;
+            s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw; return gs;
+                }
+                if (s_screenInGame >= 0 && screenIdx == (uint8_t)s_screenInGame) {
+                    // Treat as in-match even if names haven't populated yet
+                    gs.details = std::string("Playing in ") + prettyMode;
+            // Clear icons then set incrementally
+            gs.largeImageKey.clear(); gs.largeImageText.clear();
+            gs.smallImageKey.clear(); gs.smallImageText.clear();
+            if (!p1.empty()) {
+                        gs.state = std::string("As ") + p1;
+                        std::string kL = map_char_to_large_image_key(p1);
+                        if (!kL.empty()) { gs.largeImageKey = kL; gs.largeImageText = p1; }
+                    }
+                    if (!p2.empty()) {
+                        std::string key = map_char_to_small_icon_key(p2);
+                        if (!key.empty()) { gs.smallImageKey = key; gs.smallImageText = std::string("Against ") + p2; }
+                        if (gs.state.empty() && !p1.empty()) {
+                            gs.state = std::string("As ") + p1;
+                        }
+                    }
+                    log("GSPoll#%lu: offline(screen=%u) -> details='%s' state='%s'", s_poll, (unsigned)screenIdx, gs.details.c_str(), gs.state.c_str());
+            if (haveScreen) s_lastScreenIdx = screenIdx;
+            s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw; return gs;
+                }
+                // Unknown screen value: fall back below
+            }
+
+            // Fallback (no screen index): use scene/heuristics
+            uint8_t sceneVal = 0xFF; bool haveScene = read_scene_value(efzBase, sceneVal);
+            bool isCharSel = false;
+            if (haveScene && s_sceneCharSel >= 0 && sceneVal == (uint8_t)s_sceneCharSel) isCharSel = true;
+            else if (gmName && (rawMode == "Arcade" || rawMode == "Practice" || rawMode == "VS CPU" || rawMode == "VS Human") && !spawnedDebounced) isCharSel = true;
+            else if (justChangedMode) isCharSel = true;
+
+            bool isMainMenu = false;
+            if (haveScene && s_sceneMainMenu >= 0 && sceneVal == (uint8_t)s_sceneMainMenu) isMainMenu = true;
+            else if (!isCharSel && !spawnedDebounced) isMainMenu = true;
+
+            if (isMainMenu) {
                 gs.details = "Main Menu";
+                gs.largeImageKey = "efz_icon"; gs.largeImageText = "Main Menu";
+                gs.state = "The true Eternal does exist here";
+            } else if (isCharSel) {
+                gs.details = std::string("Character Select") + (prettyMode.empty() ? "" : (" - " + prettyMode));
             } else if (gmName) {
-                gs.details = std::string("Playing in ") + mode;
+                gs.details = std::string("Playing in ") + prettyMode;
             } else {
                 gs.details = "In Menus";
             }
-            gs.state.clear();
-            // Use main icon on the Main Menu
-            if (gs.details == "Main Menu") {
-                gs.largeImageKey = "efz_icon";
-                gs.largeImageText = "Main Menu";
-                gs.state = "The true Eternal does exist here";
-                gs.smallImageKey.clear();
-                gs.smallImageText.clear();
-            } else {
-                gs.largeImageKey.clear(); gs.largeImageText.clear();
-                gs.smallImageKey.clear(); gs.smallImageText.clear();
-            }
+            // Incremental icons in fallback
+            if (!p1.empty()) { std::string kL = map_char_to_large_image_key(p1); if (!kL.empty()) { gs.largeImageKey = kL; gs.largeImageText = p1; } }
+            if (!p2.empty()) { std::string key = map_char_to_small_icon_key(p2); if (!key.empty()) { gs.smallImageKey = key; gs.smallImageText = std::string("Against ") + p2; } }
         }
         log("GSPoll#%lu: offline -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
     // update last-seen names and mode before returning
@@ -581,17 +829,36 @@ GameState GameStateProvider::get() {
 
     // details: Playing/Watching online match (selfNick if known)
     if (s_waitOnlineNicknames) {
-        // Treat as offline menus until nicknames show up or state changes
-        // Prefer Main Menu if both characters are empty
-        if (p1.empty() && p2.empty())
+        // Mirror the offline menu mapping using the screen index, to avoid relying on characters
+        uint8_t screenIdx = 0xFF;
+        bool haveScreen = read_screen_index(efzBase, screenIdx);
+        if (haveScreen && s_screenTitle >= 0 && screenIdx == (uint8_t)s_screenTitle) {
             gs.details = "Main Menu";
-        else
-            gs.details = (gmName && std::string(gmName) == "Arcade") ? "Main Menu" : "In Menus";
-        gs.state.clear();
-        if (gs.details == "Main Menu") {
             gs.largeImageKey = "efz_icon";
             gs.largeImageText = "Main Menu";
             gs.state = "The true Eternal does exist here";
+        } else if (haveScreen && s_screenCharSel >= 0 && screenIdx == (uint8_t)s_screenCharSel) {
+            // Derive pretty mode locally for online-pending branch
+            std::string pm = gmName ? gmName : "";
+            if (pm == "Arcade" || pm == "Practice") pm += " Mode";
+            if (pm.empty()) pm = "Game";
+            gs.details = std::string("Playing in ") + pm;
+            // ensure no icons here until selection
+            gs.largeImageKey.clear(); gs.largeImageText.clear();
+            gs.smallImageKey.clear(); gs.smallImageText.clear();
+        } else if (haveScreen && s_screenLoading >= 0 && screenIdx == (uint8_t)s_screenLoading) {
+            gs.details = "Loading";
+            gs.state = "Loading";
+            gs.largeImageKey.clear(); gs.largeImageText.clear();
+            gs.smallImageKey.clear(); gs.smallImageText.clear();
+        } else if (haveScreen && s_screenSettings >= 0 && screenIdx == (uint8_t)s_screenSettings) {
+            gs.details = "Options"; gs.state.clear();
+            gs.largeImageKey = "efz_icon"; gs.largeImageText = "Options";
+            gs.smallImageKey.clear(); gs.smallImageText.clear();
+        } else if (haveScreen && s_screenReplayMenu >= 0 && screenIdx == (uint8_t)s_screenReplayMenu) {
+            gs.details = "Replay Selection"; gs.state = "Selecting replay";
+        } else {
+            gs.details = "In Menus";
         }
         // update last-seen names and mode and return
         s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw;

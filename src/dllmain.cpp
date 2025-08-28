@@ -69,15 +69,38 @@ void worker_main(HMODULE hMod) {
     efzda::log("Stage: entering poll loop");
     OutputDebugStringW(L"[EfzRichPresence] Entering poll loop\n");
 
+    // Optional: clear-before-update to mitigate sticky presence in some clients
+    bool clearBeforeUpdate = false;
+    try {
+        wchar_t cbu[8];
+        clearBeforeUpdate = GetEnvironmentVariableW(L"EFZDA_CLEAR_BEFORE_UPDATE", cbu, _countof(cbu)) > 0;
+    } catch (...) {}
+
+    // Poll interval (ms). Default 500ms for responsiveness; override via EFZDA_POLL_MS
+    unsigned int pollMs = 500;
+    try {
+        wchar_t pbuf[16];
+        if (GetEnvironmentVariableW(L"EFZDA_POLL_MS", pbuf, _countof(pbuf)) > 0) {
+            unsigned long v = wcstoul(pbuf, nullptr, 10);
+            if (v >= 100 && v <= 5000) pollMs = static_cast<unsigned int>(v);
+        }
+    } catch (...) {}
+
     while (g_running.load(std::memory_order_relaxed)) {
         try {
             auto cur = provider.get();
             if (cur != last) {
                 efzda::log("State change: details='%s' state='%s'", cur.details.c_str(), cur.state.c_str());
-                if (discordReady)
+                if (discordReady) {
+                    if (clearBeforeUpdate) {
+                        discord.clearPresence();
+                        // Tiny delay to let Discord register the clear
+                        std::this_thread::sleep_for(50ms);
+                    }
                     discord.updatePresence(cur.details, cur.state,
                                             cur.smallImageKey, cur.smallImageText,
                                             cur.largeImageKey, cur.largeImageText);
+                }
                 last = cur;
             }
             if (discordReady)
@@ -85,7 +108,7 @@ void worker_main(HMODULE hMod) {
         } catch (...) {
             efzda::log("Worker loop caught unexpected exception; continuing");
         }
-    std::this_thread::sleep_for(2s);
+        std::this_thread::sleep_for(std::chrono::milliseconds(pollMs));
     }
 
     if (discordReady) {

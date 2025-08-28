@@ -106,12 +106,22 @@ void DiscordClient::updatePresence(const std::string &details, const std::string
                                    const std::string &largeImageText) {
     if (g_pipe == INVALID_HANDLE_VALUE) return;
     std::string nonce = new_nonce();
-    // Note: The app name in Discord developer portal is the header; we omit constant labels here.
-    std::string activity = std::string("{\"details\":\"") + escape_json(details) +
-                           "\",\"state\":\"" + escape_json(state) + "\"";
+    // Note: Include only non-empty fields; some Discord clients ignore updates with empty strings.
+    std::string activity = "{";
+    bool needComma = false;
+    if (!details.empty()) {
+        activity += "\"details\":\"" + escape_json(details) + "\"";
+        needComma = true;
+    }
+    if (!state.empty()) {
+        if (needComma) activity += ",";
+        activity += "\"state\":\"" + escape_json(state) + "\"";
+        needComma = true;
+    }
     // assets
     if (!smallImageKey.empty() || !largeImageKey.empty()) {
-        activity += ",\"assets\":{";
+        if (needComma) activity += ",";
+        activity += "\"assets\":{";
         bool first = true;
         if (!largeImageKey.empty()) {
             activity += "\"large_image\":\"" + escape_json(largeImageKey) + "\"";
@@ -124,8 +134,15 @@ void DiscordClient::updatePresence(const std::string &details, const std::string
             if (!smallImageText.empty()) activity += ",\"small_text\":\"" + escape_json(smallImageText) + "\"";
         }
         activity += "}";
+        needComma = true;
     }
+    // Optional: mark as instance (not strictly required but harmless)
+    if (needComma) activity += ",";
+    activity += "\"instance\":true";
     activity += "}"; // close activity
+    // Log a succinct summary for troubleshooting
+    log("Discord IPC: Update(details='%s', state='%s', large='%s', small='%s')",
+        details.c_str(), state.c_str(), largeImageKey.c_str(), smallImageKey.c_str());
     std::string json = std::string("{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":")
         + std::to_string(GetCurrentProcessId()) + ",\"activity\":" + activity +
         "} ,\"nonce\":\"" + nonce + "\"}";
