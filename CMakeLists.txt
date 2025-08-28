@@ -42,10 +42,10 @@ endif()
 
 # Optional: embed a default Discord App ID here to avoid requiring a file.
 # Replace the placeholder with your actual Application (Client) ID from Discord Developer Portal.
-# Example: -DEFZDA_DEFAULT_APP_ID=\"123456789012345678\"
+
 if (NOT DEFINED EFZDA_DEFAULT_APP_ID)
     # Embedded default Discord Application ID (can be overridden at configure time)
-    set(EFZDA_DEFAULT_APP_ID "1410635317765210204")
+    set(EFZDA_DEFAULT_APP_ID "1410673196574703647")
 endif()
 target_compile_definitions(EfzRichPresence PRIVATE EFZDA_DEFAULT_APP_ID="${EFZDA_DEFAULT_APP_ID}")
 

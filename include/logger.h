@@ -3,7 +3,7 @@
 
 namespace efzda {
 
-// Initialize logger to write EfzRichPresence.log into moduleDir
+// Initialize logger to write EternalFighterZero.log into moduleDir
 void init_logger(const std::wstring &moduleDir);
 void shutdown_logger();
 // Optional console window for live logs

@@ -50,12 +50,12 @@ void init_logger(const std::wstring &moduleDir) {
                                       OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
             if (hAlt != INVALID_HANDLE_VALUE) CloseHandle(hAlt);
         }
-        OutputDebugStringW(L"[EfzRichPresence] Logger fell back to %TEMP%\n");
+    OutputDebugStringW(L"[EfzRichPresence] Logger fell back to %TEMP%\n");
     } else {
         CloseHandle(hProbe);
     }
     // Start file with session header
-    write_line_locked("=== EfzRichPresence start: " + timestamp() + " ===");
+    write_line_locked("=== Eternal Fighter Zero start: " + timestamp() + " ===");
     // Print resolved log path for diagnostics
     OutputDebugStringW((std::wstring(L"[EfzRichPresence] Logging to: ") + g_logPath + L"\n").c_str());
 }
@@ -63,7 +63,7 @@ void init_logger(const std::wstring &moduleDir) {
 void shutdown_logger() {
     std::lock_guard<std::mutex> lock(g_logMutex);
     if (!g_logPath.empty())
-    write_line_locked("=== EfzRichPresence stop: " + timestamp() + " ===");
+    write_line_locked("=== Eternal Fighter Zero stop: " + timestamp() + " ===");
 }
 
 void log(const char *fmt, ...) {

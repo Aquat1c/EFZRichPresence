@@ -220,8 +220,8 @@ static std::string normalize_display_name(const std::string& rawLower) {
     static const std::unordered_map<std::string, std::string> overrides = {
         // ONE
         {"nagamori", "Mizuka Nagamori"},
-        {"mizuka", "UNKNOWN"},               // boss version
-        {"mizukab", "UNKNOWN"},              // playable version
+        {"mizuka", "Unknown"},               // boss version reads as mizuka
+        {"mizukab", "Unknown"},              // playable version reads as mizukab
         {"nanase", "Rumi Nanase"},
         {"exnanase", "Doppel Nanase"},
         {"akane", "Akane Satomura"},
@@ -229,8 +229,10 @@ static std::string normalize_display_name(const std::string& rawLower) {
         {"mayu", "Mayu Shiina"},
         {"mio", "Mio Kouzuki"},
         {"ayu", "Ayu Tsukimiya"},
-        {"nayuki", "Nayuki Minase (Asleep)"},
-        {"nayukib", "Nayuki Minase (Awake)"},
+    // Nayuki variants per request
+    {"nayuki", "Nayuki(Sleepy)"},
+    {"nayukib", "Nayuki(Awake)"},
+    {"neyuki", "Nayuki(Sleepy)"},
         {"makoto", "Makoto Sawatari"},
         {"shiori", "Shiori Misaka"},
         {"kaori", "Kaori Misaka"},
@@ -341,6 +343,54 @@ static const char* online_state_name(OnlineState s) {
     }
 }
 
+// Map display character name to Discord small image asset key (Dev Portal)
+static std::string map_char_to_small_icon_key(const std::string& displayName) {
+    // Normalize to a tight lowercase key with no spaces/punct
+    std::string k; k.reserve(displayName.size());
+    for (unsigned char c : displayName) {
+        if (std::isalnum(c)) k.push_back((char)std::tolower(c));
+    }
+    // Handle Nayuki variants by explicit tag
+    if (k.find("nayukisleepy") != std::string::npos || k == "neyuki") return "90px-efz_neyuki_icon"; // Sleepy
+    if (k.find("nayukiawake") != std::string::npos || k == "nayuki") return "90px-efz_nayuki_icon";   // Awake
+
+    // Doppel vs Rumi
+    if (k.find("doppelnanase") != std::string::npos || k == "doppel") return "90px-efz_doppel_icon";
+    if (k.find("nanase") != std::string::npos || k.find("rumi") != std::string::npos) return "90px-efz_rumi_icon";
+
+    // Straightforward first-name matches (and some surnames)
+    if (k.find("akane") != std::string::npos) return "90px-efz_akane_icon";
+    if (k.find("akiko") != std::string::npos) return "90px-efz_akiko_icon";
+    if (k.find("ayu")   != std::string::npos) return "90px-efz_ayu_icon";
+    if (k.find("ikumi") != std::string::npos) return "90px-efz_ikumi_icon";
+    if (k.find("kanna") != std::string::npos) return "90px-efz_kanna_icon_-_copy";
+    if (k.find("kano")  != std::string::npos) return "90px-efz_kano_icon";
+    if (k.find("kaori") != std::string::npos) return "90px-efz_kaori_icon";
+    if (k.find("mai")   != std::string::npos) return "90px-efz_mai_icon";
+    if (k.find("makoto")!= std::string::npos) return "90px-efz_makoto_icon";
+    if (k.find("mayu")  != std::string::npos) return "90px-efz_mayu_icon";
+    if (k.find("minagi")!= std::string::npos) return "90px-efz_minagi_icon";
+    if (k.find("mio")   != std::string::npos) return "90px-efz_mio_icon";
+    if (k.find("misaki")!= std::string::npos) return "90px-efz_misaki_icon";
+    if (k.find("mishio")!= std::string::npos) return "90px-efz_mishio_icon";
+    if (k.find("misuzu")!= std::string::npos) return "90px-efz_misuzu_icon";
+    if (k.find("nagamori") != std::string::npos) return "90px-efz_mizuka_icon";
+    if (k.find("sayuri")!= std::string::npos) return "90px-efz_sayuri_icon";
+    if (k.find("shiori")!= std::string::npos) return "90px-efz_shiori_icon";
+    if (k.find("mizuka")!= std::string::npos || k.find("mizukab") != std::string::npos) return "90px-efz_unknown_icon";
+
+    // Unknown fallback
+    if (k == "unknown") return "90px-efz_unknown_icon";
+    return {};
+}
+
+// For now large image uses same asset namespace as small when available.
+static std::string map_char_to_large_image_key(const std::string& displayName) {
+    // If you upload separate large assets, adjust mapping here.
+    auto key = map_char_to_small_icon_key(displayName); // reuse icons if no large art
+    return key; // no generic unknown fallback; unknown is a real character
+}
+
 } // namespace
 
 GameState GameStateProvider::get() {
@@ -388,11 +438,20 @@ GameState GameStateProvider::get() {
     // Prefer EFZ game mode in offline/unknown online contexts
     const bool isReplay = (gmName && (std::string(gmName) == "Replay" || std::string(gmName) == "Auto-Replay"));
     if (onl == OnlineState::Offline || onl == OnlineState::Unknown) {
-        gs.details = "Eternal Fighter Zero"; // constant label
-
+        // No constant label; details/state reflect activity directly
         if (isReplay) {
             gs.details = "Watching replay";
             gs.state = inMatch ? (p1 + " vs " + p2) : std::string("Loading replay");
+            // Large: our character (P1), Small: opponent (P2)
+            if (!p1.empty()) {
+                std::string kL = map_char_to_large_image_key(p1);
+                if (!kL.empty()) { gs.largeImageKey = kL; gs.largeImageText = p1; }
+            }
+            // Small icon: opponent (P2) when available
+            if (!p2.empty()) {
+                std::string key = map_char_to_small_icon_key(p2);
+                if (!key.empty()) { gs.smallImageKey = key; gs.smallImageText = std::string("Against ") + p2; }
+            }
             log("GSPoll#%lu: offline replay -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
             return gs;
         }
@@ -403,15 +462,37 @@ GameState GameStateProvider::get() {
         if (mode.empty()) mode = "Game";
 
         if (inMatch) {
-            gs.state = std::string("Playing in ") + mode + " (" + p1 + ")"; // P1 perspective
+            gs.details = std::string("Playing in ") + mode;
+            gs.state = std::string("As ") + p1; // P1 perspective
+            // Large: our character (P1), Small: opponent (P2)
+            if (!p1.empty()) {
+                std::string kL = map_char_to_large_image_key(p1);
+                if (!kL.empty()) { gs.largeImageKey = kL; gs.largeImageText = p1; }
+            }
+            // Small icon: opponent (P2) when available
+            if (!p2.empty()) {
+                std::string key = map_char_to_small_icon_key(p2);
+                if (!key.empty()) { gs.smallImageKey = key; gs.smallImageText = std::string("Against ") + p2; }
+            }
         } else {
             // Menu or pre-select
             if (gmName && std::string(gmName) == "Arcade")
-                gs.state = "Main Menu";
+                gs.details = "Main Menu";
             else if (gmName)
-                gs.state = std::string("Playing in ") + mode;
+                gs.details = std::string("Playing in ") + mode;
             else
-                gs.state = "In Menus";
+                gs.details = "In Menus";
+            gs.state.clear();
+            // Use main icon on the Main Menu
+            if (gs.details == "Main Menu") {
+                gs.largeImageKey = "efz_icon";
+                gs.largeImageText = "Main Menu";
+                gs.smallImageKey.clear();
+                gs.smallImageText.clear();
+            } else {
+                gs.largeImageKey.clear(); gs.largeImageText.clear();
+                gs.smallImageKey.clear(); gs.smallImageText.clear();
+            }
         }
         log("GSPoll#%lu: offline -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
         return gs;
@@ -457,15 +538,34 @@ GameState GameStateProvider::get() {
         st += "the ";
         st += oppNick;
     } else {
-        st += oppChar.empty() ? std::string("Unknown") : oppChar;
+        st += oppChar.empty() ? std::string("undefined") : oppChar;
         if (!oppNick.empty()) {
             st += " ("; st += oppNick; st += ")";
         }
     }
-    if (ourWins > 0 || theirWins > 0) {
-        st += " (" + std::to_string(ourWins) + "-" + std::to_string(theirWins) + ")";
-    }
+    // Always show current score, including 0-0 at match start
+    st += " (" + std::to_string(ourWins) + "-" + std::to_string(theirWins) + ")";
     gs.state = st;
+
+    std::string oppForIcon = oppChar;
+    // If we fell back to nickname and not char, try not to set icon
+    if (!oppForIcon.empty()) {
+        std::string key = map_char_to_small_icon_key(oppForIcon);
+        if (!key.empty()) {
+            gs.smallImageKey = key;
+            gs.smallImageText = std::string("Against ") + oppForIcon; // tooltip shows the opponent
+        }
+    }
+    // Set large image to our character (based on selfIdx and p1/p2)
+    const std::string& ourChar = (selfIdx == 1 ? p2 : p1);
+    if (!ourChar.empty()) {
+        std::string kL = map_char_to_large_image_key(ourChar);
+        if (!kL.empty()) { gs.largeImageKey = kL; gs.largeImageText = ourChar; }
+    } else {
+        // Pre-pick (no character yet): use the generic EFZ logo as large image
+        gs.largeImageKey = "210px-efzlogo";
+        gs.largeImageText = "Online Match";
+    }
     log("GSPoll#%lu: online -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
     return gs;
 }

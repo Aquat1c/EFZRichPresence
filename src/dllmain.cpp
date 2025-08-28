@@ -77,7 +77,9 @@ void worker_main(HMODULE hMod) {
             if (cur != last) {
                 efzda::log("State change: details='%s' state='%s'", cur.details.c_str(), cur.state.c_str());
                 if (discordReady)
-                    discord.updatePresence(cur.details, cur.state);
+                    discord.updatePresence(cur.details, cur.state,
+                                            cur.smallImageKey, cur.smallImageText,
+                                            cur.largeImageKey, cur.largeImageText);
                 last = cur;
             }
             if (discordReady)

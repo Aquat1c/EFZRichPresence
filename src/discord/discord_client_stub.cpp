@@ -99,14 +99,36 @@ bool DiscordClient::init(const std::string &appId) {
     return true;
 }
 
-void DiscordClient::updatePresence(const std::string &details, const std::string &state) {
+void DiscordClient::updatePresence(const std::string &details, const std::string &state,
+                                   const std::string &smallImageKey,
+                                   const std::string &smallImageText,
+                                   const std::string &largeImageKey,
+                                   const std::string &largeImageText) {
     if (g_pipe == INVALID_HANDLE_VALUE) return;
     std::string nonce = new_nonce();
-    // Note: The app name in Discord developer portal is the primary label. We also set assets.large_text as a visible hover text.
+    // Note: The app name in Discord developer portal is the header; we omit constant labels here.
+    std::string activity = std::string("{\"details\":\"") + escape_json(details) +
+                           "\",\"state\":\"" + escape_json(state) + "\"";
+    // assets
+    if (!smallImageKey.empty() || !largeImageKey.empty()) {
+        activity += ",\"assets\":{";
+        bool first = true;
+        if (!largeImageKey.empty()) {
+            activity += "\"large_image\":\"" + escape_json(largeImageKey) + "\"";
+            if (!largeImageText.empty()) activity += ",\"large_text\":\"" + escape_json(largeImageText) + "\"";
+            first = false;
+        }
+        if (!smallImageKey.empty()) {
+            if (!first) activity += ",";
+            activity += "\"small_image\":\"" + escape_json(smallImageKey) + "\"";
+            if (!smallImageText.empty()) activity += ",\"small_text\":\"" + escape_json(smallImageText) + "\"";
+        }
+        activity += "}";
+    }
+    activity += "}"; // close activity
     std::string json = std::string("{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":")
-        + std::to_string(GetCurrentProcessId()) + ",\"activity\":{\"details\":\"" + escape_json(details) +
-        "\",\"state\":\"" + escape_json(state) +
-        "\",\"assets\":{\"large_text\":\"Eternal Fighter Zero\"}}} ,\"nonce\":\"" + nonce + "\"}";
+        + std::to_string(GetCurrentProcessId()) + ",\"activity\":" + activity +
+        "} ,\"nonce\":\"" + nonce + "\"}";
     if (!write_frame(1, json)) {
         log("Discord IPC: SET_ACTIVITY write failed; attempting reconnect");
         CloseHandle(g_pipe); g_pipe = INVALID_HANDLE_VALUE; connect_pipe();
