@@ -865,7 +865,29 @@ GameState GameStateProvider::get() {
         log("GSPoll#%lu: online pending nicknames -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
         return gs;
     } else if (onl == OnlineState::Spectating) {
-        gs.details = "Watching online match"; // spectator has no nickname in memory; omit parens
+        // Spectating: format like replay with nicknames and characters
+        gs.details = "Watching online match";
+        auto makeSide = [](const std::string& nick, const std::string& chr, const char* fallbackLabel) {
+            if (!nick.empty() && !chr.empty()) return nick + " (" + chr + ")";
+            if (!nick.empty()) return nick;
+            if (!chr.empty()) return chr;
+            return std::string(fallbackLabel);
+        };
+        std::string left = makeSide(p1Nick, p1, "P1");
+        std::string right = makeSide(p2Nick, p2, "P2");
+        gs.state = left + " vs " + right + " (" + std::to_string(p1Wins) + "-" + std::to_string(p2Wins) + ")";
+        // Icons: mirror replay — large=P1 char, small=P2 char
+        if (!p1.empty()) {
+            std::string kL = map_char_to_large_image_key(p1);
+            if (!kL.empty()) { gs.largeImageKey = kL; gs.largeImageText = p1; }
+        }
+        if (!p2.empty()) {
+            std::string kS = map_char_to_small_icon_key(p2);
+            if (!kS.empty()) { gs.smallImageKey = kS; gs.smallImageText = p2; }
+        }
+        log("GSPoll#%lu: spectating -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
+        s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw;
+        return gs;
     } else if (onl == OnlineState::Tournament) {
         gs.details = std::string("Playing tournament match") + (selfNick.empty() ? "" : (" (" + selfNick + ")"));
     } else {

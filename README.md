@@ -67,8 +67,10 @@ cmake --build out/build/vs2022-Win32 --config RelWithDebInfo --target EfzRichPre
 	  ![Tournament match](docs/screenshots/tournament.png)
 	- Spectating: details “Watching online match”.
 
+	  State is formatted like a replay: `p1Nick (p1Char) vs p2Nick (p2Char) (p1-p2)`.
+
 	  ![Spectating](docs/screenshots/spectating.png)
-	- State: “Against <opponentChar> (oppNick) (you-them)”. If the opponent character can’t be read, shows “Against the <nickname> (you-them)” and omits the small icon.
+	- State (Netplay/Tournament): “Against <opponentChar> (oppNick) (you-them)”. If the opponent character can’t be read, shows “Against the <nickname> (you-them)” and omits the small icon. If neither nickname nor character is available yet, shows “Waiting for the opponent...”.
 	- Large image: your character; before you pick a character, large image is `210px-efzlogo`.
 
 ## License
