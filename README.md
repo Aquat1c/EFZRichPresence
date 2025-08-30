@@ -10,7 +10,6 @@ It reads EFZ state from process memory and integrates EfzRevival for online stat
 - Characters and nicknames:
 	- Large image = your character; Small image = opponent character.
 	- If opponent character can’t be read in netplay, state becomes “Against the <nickname> …” and the small icon is omitted.
-	- The in-game character “Unknown” (read as mizuka/mizukab) is treated as a real character and uses its own icon.
 - Scores and orientation:
 	- Scores come from EfzRevival and are shown from your perspective as “(you-them)”.
 	- Score is always displayed online, starting at 0-0.
