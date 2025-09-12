@@ -53,7 +53,7 @@ PLEASE KEEP IN MIND THAT THIS WASN'T TESTED
 
 Windows games under Wine/Proton can’t talk to the native Linux Discord UNIX socket directly. Use a tiny bridge to relay Windows named pipes to the Linux Discord socket:
 
-- Bridge: (discord-ipc-bridge)[https://github.com/hitomi-team/discord-ipc-bridge]
+- Bridge: [discord-ipc-bridge](https://github.com/hitomi-team/discord-ipc-bridge)
 - Follow its README to install. It can run as a service in your Proton/Wine prefix.
 - Optional auto-start from this DLL: set an environment variable with the bridge path before launching EFZ:
 
