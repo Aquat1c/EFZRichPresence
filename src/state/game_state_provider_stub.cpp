@@ -244,21 +244,30 @@ static std::string narrow(const std::wstring& w) {
 // Simple nickname sanitization similar to efz_streaming
 static std::wstring sanitize_nickname_w(const std::wstring& in, size_t maxLen = 20) {
     if (in.empty()) return L"";
-    const wchar_t* allowed = L" -_.!?+#@$%&*()[]{}:;<>,'\"\\|/~^";
     std::wstring out;
     out.reserve(in.size());
     size_t count = 0;
+    bool lastWasSpace = false;
     for (wchar_t c : in) {
+        if (c == L'\0') break;
         if (count >= maxLen) break;
-        bool ok = (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9');
-        if (!ok) {
-            for (const wchar_t* p = allowed; *p; ++p) { if (c == *p) { ok = true; break; } }
+        // Drop control characters; normalize common whitespace to a single space
+        if (iswcntrl(c)) continue;
+        if (c == L'\r' || c == L'\n' || c == L'\t') c = L' ';
+        if (iswspace(c)) {
+            if (lastWasSpace) continue; // collapse consecutive spaces
+            lastWasSpace = true;
+            out.push_back(L' ');
+            ++count;
+            continue;
         }
-        if (ok) { out.push_back(c); ++count; }
-        else {
-            if (out.empty() || out.back() != L'_') { out.push_back(L'_'); ++count; }
-        }
+        lastWasSpace = false;
+        // Keep all remaining printable Unicode characters as-is (supports Japanese, etc.)
+        out.push_back(c);
+        ++count;
     }
+    // Trim trailing space if present
+    while (!out.empty() && out.back() == L' ') out.pop_back();
     return out;
 }
 
