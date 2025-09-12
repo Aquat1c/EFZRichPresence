@@ -49,6 +49,8 @@ cmake --build out/build/vs2022-Win32 --config RelWithDebInfo --target EfzRichPre
 
 ### Linux / Proton
 
+PLEASE KEEP IN MIND THAT THIS WASN'T TESTED
+
 Windows games under Wine/Proton can’t talk to the native Linux Discord UNIX socket directly. Use a tiny bridge to relay Windows named pipes to the Linux Discord socket:
 
 - Bridge: https://github.com/hitomi-team/discord-ipc-bridge (fork of wine-discord-ipc-bridge)
