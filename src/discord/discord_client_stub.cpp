@@ -13,6 +13,27 @@ namespace efzda {
 
 static HANDLE g_pipe = INVALID_HANDLE_VALUE;
 static std::string g_appId;
+static bool g_isWine = false;
+static bool detect_wine_once() {
+    static bool inited = false;
+    static bool underWine = false;
+    if (inited) return underWine;
+    inited = true;
+    // Env override: EFZDA_ASSUME_WINE=1 forces Wine path; =0 forces native
+    wchar_t buf[16];
+    DWORD n = GetEnvironmentVariableW(L"EFZDA_ASSUME_WINE", buf, _countof(buf));
+    if (n > 0) {
+        underWine = (wcstol(buf, nullptr, 0) != 0);
+        return underWine;
+    }
+    // Probe ntdll for wine_get_version symbol (present under Wine)
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (ntdll) {
+        FARPROC p = GetProcAddress(ntdll, "wine_get_version");
+        underWine = (p != nullptr);
+    }
+    return underWine;
+}
 
 static std::string escape_json(const std::string& in) {
     std::string out; out.reserve(in.size() + 8);
@@ -48,17 +69,52 @@ static bool write_frame(uint32_t op, const std::string& json) {
 }
 
 static bool connect_pipe() {
-    // Try discord-ipc-0..9
-    for (int i = 0; i < 10; ++i) {
-        wchar_t name[64];
-        swprintf_s(name, L"\\\\.\\pipe\\discord-ipc-%d", i);
-        HANDLE h = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h != INVALID_HANDLE_VALUE) {
-            g_pipe = h;
-            return true;
+    g_isWine = detect_wine_once();
+    auto try_connect = []() -> bool {
+        for (int i = 0; i < 10; ++i) {
+            wchar_t name[64];
+            swprintf_s(name, L"\\\\.\\pipe\\discord-ipc-%d", i);
+            HANDLE h = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h != INVALID_HANDLE_VALUE) {
+                g_pipe = h;
+                return true;
+            }
+        }
+        return false;
+    };
+    // Strategy:
+    // - On native Windows: only try named pipes; do NOT attempt bridge (faster failure on no Discord).
+    // - On Wine/Proton: try bridge first (if configured) to speed up startup, then connect.
+    if (!g_isWine) {
+        return try_connect();
+    }
+
+    // Under Wine/Proton: spawn bridge first if provided
+    wchar_t bridgePath[512];
+    DWORD n = GetEnvironmentVariableW(L"EFZDA_WINE_BRIDGE", bridgePath, _countof(bridgePath));
+    if (n > 0 && n < _countof(bridgePath)) {
+        STARTUPINFOW si{}; si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        // CreateProcessW modifies the buffer, so copy to a writable command line
+        std::wstring cmd = L"\"" + std::wstring(bridgePath) + L"\"";
+        BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+        if (ok) {
+            log("Discord IPC: Launched Wine bridge: '%ls'", bridgePath);
+            CloseHandle(pi.hThread);
+            // Give it a moment to create the named pipe
+            Sleep(500);
+            // Retry connect a couple of times
+            for (int i = 0; i < 5; ++i) {
+                if (try_connect()) return true;
+                Sleep(300);
+            }
+            CloseHandle(pi.hProcess);
+        } else {
+            log("Discord IPC: Failed to launch Wine bridge: '%ls' (err=%lu)", bridgePath, GetLastError());
         }
     }
-    return false;
+    // Final attempt: try connecting anyway (bridge might already be running)
+    return try_connect();
 }
 
 static std::string new_nonce() {

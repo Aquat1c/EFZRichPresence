@@ -46,6 +46,21 @@ cmake --build out/build/vs2022-Win32 --config RelWithDebInfo --target EfzRichPre
 - Add this line to the bottom of `EfzModManager.ini`:
   - `EfzRichPresence=1`
   - EFZ Mod Manager download: [link](https://docs.google.com/spreadsheets/d/1r0nBAaQczj9K4RG5zAVV4uXperDeoSnXaqQBal2-8Us/edit?usp=sharing)
+
+### Linux / Proton
+
+Windows games under Wine/Proton can’t talk to the native Linux Discord UNIX socket directly. Use a tiny bridge to relay Windows named pipes to the Linux Discord socket:
+
+- Bridge: https://github.com/hitomi-team/discord-ipc-bridge (fork of wine-discord-ipc-bridge)
+- Follow its README to install. It can run as a service in your Proton/Wine prefix.
+- Optional auto-start from this DLL: set an environment variable with the bridge path before launching EFZ:
+
+	- PowerShell (Windows):
+		- `$Env:EFZDA_WINE_BRIDGE = "C:\\path\\to\\winediscordipcbridge.exe"`
+	- Steam Proton (Linux):
+		- Add to Launch Options: `EFZDA_WINE_BRIDGE=/path/to/winediscordipcbridge %command%`
+
+If the Discord pipe isn’t available at startup, the DLL will attempt to spawn the bridge and reconnect a few times.
 ## Runtime behavior (details/state)
 
 - Offline
