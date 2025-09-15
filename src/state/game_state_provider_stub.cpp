@@ -688,7 +688,7 @@ GameState GameStateProvider::get() {
                     gs.details = "Main Menu";
                     gs.state.clear();
                     gs.largeImageKey = "efz_icon"; gs.largeImageText = "Main Menu";
-                    gs.state = "The true Eternal does exist here";
+                    gs.state = "The true Eternal does exists here";
                     gs.smallImageKey.clear(); gs.smallImageText.clear();
                     log("GSPoll#%lu: offline(screen=%u) -> details='%s' state='%s'", s_poll, (unsigned)screenIdx, gs.details.c_str(), gs.state.c_str());
             if (haveScreen) s_lastScreenIdx = screenIdx;
@@ -787,7 +787,7 @@ GameState GameStateProvider::get() {
             if (isMainMenu) {
                 gs.details = "Main Menu";
                 gs.largeImageKey = "efz_icon"; gs.largeImageText = "Main Menu";
-                gs.state = "The true Eternal does exist here";
+                gs.state = "The true Eternal does exists here";
             } else if (isCharSel) {
                 gs.details = std::string("Character Select") + (prettyMode.empty() ? "" : (" - " + prettyMode));
             } else if (gmName) {
@@ -845,7 +845,7 @@ GameState GameStateProvider::get() {
             gs.details = "Main Menu";
             gs.largeImageKey = "efz_icon";
             gs.largeImageText = "Main Menu";
-            gs.state = "The true Eternal does exist here";
+            gs.state = "The true Eternal does exists here";
         } else if (haveScreen && s_screenCharSel >= 0 && screenIdx == (uint8_t)s_screenCharSel) {
             // Derive pretty mode locally for online-pending branch
             std::string pm = gmName ? gmName : "";
