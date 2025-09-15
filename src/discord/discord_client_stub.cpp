@@ -86,7 +86,12 @@ static bool connect_pipe() {
     // - On native Windows: only try named pipes; do NOT attempt bridge (faster failure on no Discord).
     // - On Wine/Proton: try bridge first (if configured) to speed up startup, then connect.
     if (!g_isWine) {
-        return try_connect();
+        // Native Windows: retry briefly in case Discord's pipe isn't ready yet
+        for (int attempt = 0; attempt < 10; ++attempt) {
+            if (try_connect()) return true;
+            Sleep(100);
+        }
+        return false;
     }
 
     // Under Wine/Proton: spawn bridge first if provided
@@ -204,7 +209,13 @@ void DiscordClient::updatePresence(const std::string &details, const std::string
         "} ,\"nonce\":\"" + nonce + "\"}";
     if (!write_frame(1, json)) {
         log("Discord IPC: SET_ACTIVITY write failed; attempting reconnect");
-        CloseHandle(g_pipe); g_pipe = INVALID_HANDLE_VALUE; connect_pipe();
+        if (g_pipe != INVALID_HANDLE_VALUE) { CloseHandle(g_pipe); g_pipe = INVALID_HANDLE_VALUE; }
+        if (connect_pipe()) {
+            // Try once more with the same payload after a successful reconnect
+            if (!write_frame(1, json)) {
+                log("Discord IPC: SET_ACTIVITY write failed after reconnect");
+            }
+        }
     }
 }
 

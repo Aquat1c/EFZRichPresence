@@ -86,6 +86,41 @@ void worker_main(HMODULE hMod) {
         }
     } catch (...) {}
 
+    // Kick: push an initial presence right away so Main Menu shows up even if state doesn't change soon
+    try {
+        auto cur0 = provider.get();
+        if (discordReady) {
+            // Always clear once before first update to avoid sticky/null initial state
+            discord.clearPresence();
+            std::this_thread::sleep_for(150ms);
+            discord.updatePresence(cur0.details, cur0.state,
+                                    cur0.smallImageKey, cur0.smallImageText,
+                                    cur0.largeImageKey, cur0.largeImageText);
+        }
+        last = cur0;
+    } catch (...) {
+        efzda::log("Initial presence push failed; continuing");
+    }
+
+    // Small warm-up resend: Discord may ignore the very first SET_ACTIVITY immediately after handshake
+    // if its session isn't fully ready yet. Try again shortly to ensure Main Menu is visible.
+    if (discordReady) {
+        std::this_thread::sleep_for(250ms);
+        try {
+            if (clearBeforeUpdate) {
+                discord.clearPresence();
+                std::this_thread::sleep_for(50ms);
+            }
+            discord.updatePresence(last.details, last.state,
+                                    last.smallImageKey, last.smallImageText,
+                                    last.largeImageKey, last.largeImageText);
+        } catch (...) {
+            efzda::log("Warm-up presence resend failed; continuing");
+        }
+    }
+
+    const auto startTicks = GetTickCount64();
+    DWORD lastKickResend = 0;
     while (g_running.load(std::memory_order_relaxed)) {
         try {
             auto cur = provider.get();
@@ -102,6 +137,24 @@ void worker_main(HMODULE hMod) {
                                             cur.largeImageKey, cur.largeImageText);
                 }
                 last = cur;
+            }
+            // Kick window: For the first 5 seconds after startup, resend the last
+            // snapshot about once per second even without a state change. Some
+            // Discord clients ignore the very first update immediately after handshake.
+            if (discordReady) {
+                DWORD now = GetTickCount();
+                if (GetTickCount64() - startTicks < 5000ULL) {
+                    if (lastKickResend == 0 || now - lastKickResend >= 1000) {
+                        if (clearBeforeUpdate) {
+                            discord.clearPresence();
+                            std::this_thread::sleep_for(50ms);
+                        }
+                        discord.updatePresence(last.details, last.state,
+                                                last.smallImageKey, last.smallImageText,
+                                                last.largeImageKey, last.largeImageText);
+                        lastKickResend = now;
+                    }
+                }
             }
             if (discordReady)
                 discord.poll();
