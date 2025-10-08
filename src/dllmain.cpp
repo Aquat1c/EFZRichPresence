@@ -86,6 +86,30 @@ void worker_main(HMODULE hMod) {
         }
     } catch (...) {}
 
+    // Optional: force periodic updates even when state doesn't change to avoid clients getting "stuck".
+    // EFZDA_ALWAYS_UPDATE=1 => send every poll (beware of Discord rate limits)
+    // EFZDA_FORCE_UPDATE_MS=N => send at least once every N ms (default 20000 if var present with invalid value)
+    bool alwaysUpdate = false;
+    unsigned int forceUpdateMs = 0; // 0 = disabled
+    try {
+        wchar_t abuf[8];
+        if (GetEnvironmentVariableW(L"EFZDA_ALWAYS_UPDATE", abuf, _countof(abuf)) > 0) {
+            alwaysUpdate = (wcstol(abuf, nullptr, 10) != 0);
+        }
+        wchar_t fbuf[16];
+        if (GetEnvironmentVariableW(L"EFZDA_FORCE_UPDATE_MS", fbuf, _countof(fbuf)) > 0) {
+            unsigned long v = wcstoul(fbuf, nullptr, 10);
+            if (v == 0) {
+                // treat 0 as disable; ignore
+            } else {
+                // clamp to a safe range to avoid Discord rate limits
+                if (v < 1000) v = 1000; // at most 1/sec
+                if (v > 60000) v = 60000;
+                forceUpdateMs = static_cast<unsigned int>(v);
+            }
+        }
+    } catch (...) {}
+
     // Kick: push an initial presence right away so Main Menu shows up even if state doesn't change soon
     try {
         auto cur0 = provider.get();
@@ -121,22 +145,33 @@ void worker_main(HMODULE hMod) {
 
     const auto startTicks = GetTickCount64();
     DWORD lastKickResend = 0;
+    ULONGLONG lastSentAt = 0; // last time we called updatePresence
     while (g_running.load(std::memory_order_relaxed)) {
         try {
             auto cur = provider.get();
-            if (cur != last) {
-                efzda::log("State change: details='%s' state='%s'", cur.details.c_str(), cur.state.c_str());
-                if (discordReady) {
-                    if (clearBeforeUpdate) {
-                        discord.clearPresence();
-                        // Tiny delay to let Discord register the clear
-                        std::this_thread::sleep_for(50ms);
-                    }
-                    discord.updatePresence(cur.details, cur.state,
-                                            cur.smallImageKey, cur.smallImageText,
-                                            cur.largeImageKey, cur.largeImageText);
+            bool changed = (cur != last);
+            bool periodic = false;
+            if (!changed) {
+                if (alwaysUpdate) periodic = true;
+                else if (forceUpdateMs > 0) {
+                    ULONGLONG now = GetTickCount64();
+                    periodic = (lastSentAt == 0 || (now - lastSentAt) >= forceUpdateMs);
                 }
-                last = cur;
+            }
+            if (discordReady && (changed || periodic)) {
+                if (changed) {
+                    efzda::log("State change: details='%s' state='%s'", cur.details.c_str(), cur.state.c_str());
+                }
+                if (clearBeforeUpdate) {
+                    discord.clearPresence();
+                    // Tiny delay to let Discord register the clear
+                    std::this_thread::sleep_for(50ms);
+                }
+                discord.updatePresence(cur.details, cur.state,
+                                        cur.smallImageKey, cur.smallImageText,
+                                        cur.largeImageKey, cur.largeImageText);
+                last = cur; // even if identical, keep last in sync
+                lastSentAt = GetTickCount64();
             }
             // Kick window: For the first 5 seconds after startup, resend the last
             // snapshot about once per second even without a state change. Some

@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <cctype>
+#include <atomic>
+#include <cwctype>
 #include <type_traits>
 #include <cstdio>
 #include "logger.h"
@@ -23,22 +25,35 @@ constexpr uintptr_t EFZ_BASE_OFFSET_GAME_STATE = 0x39010C;
 constexpr uintptr_t EFZ_GLOBAL_SCREEN_INDEX_OFFSET = 0x390148; // byte: current UI state index
 constexpr uintptr_t CHARACTER_NAME_OFFSET = 0x94;
 
-constexpr uintptr_t WIN_COUNT_BASE_OFFSET = 0xA02CC; // in EfzRevival.dll
-constexpr uintptr_t P1_WIN_COUNT_OFFSET = 0x4C8;
-constexpr uintptr_t P2_WIN_COUNT_OFFSET = 0x4CC;
+// EfzRevival version-aware RVAs
+// 1.02e: wins-base ptr RVA=0x00A02CC, online-state RVA=0x00A05D0
+// 1.02h: wins-base ptr RVA=0x00A02EC, online-state RVA=0x00A05F0
+// 1.02i: wins-base ptr RVA=0x00A15F8, online-state RVA=0x00A15FC
+constexpr uintptr_t P1_WIN_COUNT_OFFSET_1_02h = 0x4C8;
+constexpr uintptr_t P2_WIN_COUNT_OFFSET_1_02h = 0x4CC;
+constexpr uintptr_t P1_WIN_COUNT_OFFSET_1_02i = 0x4D0; // from CE table (netplay)
+constexpr uintptr_t P2_WIN_COUNT_OFFSET_1_02i = 0x4D4; // from CE table (netplay)
+// Tournament mode win counters (observed on 1.02h!!!): base+0x2FC and base+0x300
+constexpr uintptr_t P1_TOURN_WIN_COUNT_OFFSET_1_02h = 0x2FC;
+constexpr uintptr_t P2_TOURN_WIN_COUNT_OFFSET_1_02h = 0x300;
+constexpr uintptr_t P1_TOURN_WIN_COUNT_OFFSET_1_02i = 0x304; // from CE table provided
+constexpr uintptr_t P2_TOURN_WIN_COUNT_OFFSET_1_02i = 0x308; // from CE table provided
 constexpr uintptr_t P1_WIN_COUNT_SPECTATOR_OFFSET = 0x80; // fallback
 constexpr uintptr_t P2_WIN_COUNT_SPECTATOR_OFFSET = 0x84; // fallback
 // Nicknames (wide strings) relative to same base pointer
-constexpr uintptr_t P1_NICKNAME_OFFSET = 0x3BE;
-constexpr uintptr_t P2_NICKNAME_OFFSET = 0x43E;
+constexpr uintptr_t P1_NICKNAME_OFFSET_1_02h = 0x3BE;
+constexpr uintptr_t P2_NICKNAME_OFFSET_1_02h = 0x43E;
+constexpr uintptr_t P1_NICKNAME_OFFSET_1_02i = 0x3C6; // from CE table (netplay)
+constexpr uintptr_t P2_NICKNAME_OFFSET_1_02i = 0x446; // from CE table (netplay)
 constexpr uintptr_t P1_NICKNAME_SPECTATOR_OFFSET = 0x9A;
 constexpr uintptr_t P2_NICKNAME_SPECTATOR_OFFSET = 0x11A;
 // "Current player" index: 0 = P1, 1 = P2, relative to same base pointer
-constexpr uintptr_t CURRENT_PLAYER_OFFSET = 0x2A8;
+constexpr uintptr_t CURRENT_PLAYER_OFFSET_1_02h = 0x2A8; // verified for 1.02h!!!
+constexpr uintptr_t CURRENT_PLAYER_OFFSET_1_02i = 0x2B0; // verified from 1.02i decomp (this+688)
 
 // From efz-training-mode
 constexpr uintptr_t GAME_MODE_OFFSET = 0x1364; // byte in game state struct
-constexpr uintptr_t REVIVAL_ONLINE_STATE_OFFSET = 0xA05D0; // int in EfzRevival.dll
+// Choose actual offsets at runtime based on EFZ window title ("-Revival- 1.02e/h/i").
 
 static inline unsigned long long ticks() { return GetTickCount64(); }
 // Silent memory read (no logging), for probing purposes
@@ -100,6 +115,187 @@ bool safe_read_bytes(const void* addr, void* buffer, size_t size) {
         efzda::log("[tick=%llu] READBYTES fail @%p size=%zu read=%zu err=%lu", ticks(), addr, size, (size_t)read, (unsigned long)err);
         return false;
     }
+}
+
+// --- EfzRevival version detection and RVA selection ---
+enum class EfzRevivalVersion : int { Unknown = 0, Vanilla, Revival102e, Revival102h, Revival102i, Other };
+
+static BOOL CALLBACK EnumWindowsProcFindSelf(HWND hwnd, LPARAM lParam) {
+    DWORD pid = 0; GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == GetCurrentProcessId() && IsWindowVisible(hwnd) && GetWindow(hwnd, GW_OWNER) == nullptr) {
+        *reinterpret_cast<HWND*>(lParam) = hwnd;
+        return FALSE; // stop
+    }
+    return TRUE; // continue
+}
+
+static HWND FindMainWindowForSelf() {
+    HWND found = nullptr;
+    EnumWindows(EnumWindowsProcFindSelf, reinterpret_cast<LPARAM>(&found));
+    return found;
+}
+
+static EfzRevivalVersion DetectEfzRevivalVersion() {
+    static std::atomic<int> s_cached{-1}; // -1 = unresolved, else EfzRevivalVersion
+    int v = s_cached.load(std::memory_order_acquire);
+    if (v != -1) return static_cast<EfzRevivalVersion>(v);
+    HWND hwnd = FindMainWindowForSelf();
+    if (!hwnd) {
+        return EfzRevivalVersion::Unknown; // keep unresolved to retry
+    }
+    wchar_t titleW[256] = {};
+    if (GetWindowTextW(hwnd, titleW, _countof(titleW)) <= 0) {
+        return EfzRevivalVersion::Unknown; // retry later
+    }
+    // narrow to lower
+    int need = WideCharToMultiByte(CP_UTF8, 0, titleW, -1, nullptr, 0, nullptr, nullptr);
+    std::string t(need > 0 ? need - 1 : 0, '\0');
+    if (need > 0) WideCharToMultiByte(CP_UTF8, 0, titleW, -1, t.data(), need, nullptr, nullptr);
+    std::string lower = t; std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c){ return (char)std::tolower(c); });
+    EfzRevivalVersion ver = EfzRevivalVersion::Vanilla;
+    if (lower.find("-revival-") != std::string::npos) {
+        if (lower.find("1.02e") != std::string::npos) ver = EfzRevivalVersion::Revival102e;
+        else if (lower.find("1.02h") != std::string::npos) ver = EfzRevivalVersion::Revival102h;
+        else if (lower.find("1.02i") != std::string::npos) ver = EfzRevivalVersion::Revival102i;
+        else ver = EfzRevivalVersion::Other;
+    } else {
+        ver = EfzRevivalVersion::Vanilla;
+    }
+    s_cached.store(static_cast<int>(ver), std::memory_order_release);
+    return ver;
+}
+
+static uintptr_t RevivalWinsBaseRva() {
+    // Optional override for diagnostics: EFZDA_WINS_BASE_RVA (hex or decimal)
+    wchar_t buf[32]; DWORD n = GetEnvironmentVariableW(L"EFZDA_WINS_BASE_RVA", buf, _countof(buf));
+    if (n > 0) {
+        wchar_t* end = nullptr; unsigned long v = wcstoul(buf, &end, 0);
+        if (v > 0 && v < 0x1000000) return (uintptr_t)v;
+    }
+    EfzRevivalVersion v = DetectEfzRevivalVersion();
+    switch (v) {
+        case EfzRevivalVersion::Revival102e: return 0x00A02CC;
+        case EfzRevivalVersion::Revival102h: return 0x00A02EC;
+        case EfzRevivalVersion::Revival102i: return 0x00A15F8;
+        default: return 0; // Vanilla/Other/Unknown
+    }
+}
+
+static uintptr_t RevivalOnlineStateRva() {
+    // Optional override for diagnostics: EFZDA_ONLINE_STATE_RVA (hex or decimal)
+    wchar_t buf[32]; DWORD n = GetEnvironmentVariableW(L"EFZDA_ONLINE_STATE_RVA", buf, _countof(buf));
+    if (n > 0) {
+        wchar_t* end = nullptr; unsigned long v = wcstoul(buf, &end, 0);
+        if (v > 0 && v < 0x1000000) return (uintptr_t)v;
+    }
+    EfzRevivalVersion v = DetectEfzRevivalVersion();
+    switch (v) {
+        case EfzRevivalVersion::Revival102e: return 0x00A05D0;
+        case EfzRevivalVersion::Revival102h: return 0x00A05F0;
+        case EfzRevivalVersion::Revival102i: return 0x00A15FC;
+        default: return 0; // Vanilla/Other/Unknown
+    }
+}
+
+// New pointer-chain based online-state: EfzRevival.dll+0x26A4 -> ptr; byte at ptr+offset
+static uintptr_t RevivalOnlineStatePtrRva() {
+    // Optional override: EFZDA_ONLINE_STATE_PTR_RVA
+    wchar_t buf[32]; DWORD n = GetEnvironmentVariableW(L"EFZDA_ONLINE_STATE_PTR_RVA", buf, _countof(buf));
+    if (n > 0) {
+        wchar_t* end = nullptr; unsigned long v = wcstoul(buf, &end, 0);
+        if (v > 0 && v < 0x1000000) return (uintptr_t)v;
+    }
+    return 0x000026A4; // from user's CE table
+}
+
+static uintptr_t RevivalOnlineStateOffsetPrimary() {
+    // Optional override: EFZDA_ONLINE_STATE_OFFSET
+    wchar_t buf[32]; DWORD n = GetEnvironmentVariableW(L"EFZDA_ONLINE_STATE_OFFSET", buf, _countof(buf));
+    if (n > 0) {
+        wchar_t* end = nullptr; unsigned long v = wcstoul(buf, &end, 0);
+        if (v > 0 && v < 0x10000) return (uintptr_t)v;
+    }
+    EfzRevivalVersion v = DetectEfzRevivalVersion();
+    // 1.02i uses +0x37C, 1.02h/e use +0x370
+    if (v == EfzRevivalVersion::Revival102i) return 0x37C;
+    // Default to h/e
+    return 0x370;
+}
+
+static uintptr_t RevivalOnlineStateOffsetAlternate() {
+    // If primary is 0x37C (i), alt is 0x370; otherwise 0x37C
+    uintptr_t p = RevivalOnlineStateOffsetPrimary();
+    return (p == 0x37C) ? 0x370 : 0x37C;
+}
+
+// Version-aware current-player offset with optional environment override
+static uintptr_t CurrentPlayerOffset() {
+    // Optional override: EFZDA_CURRENT_PLAYER_OFFSET (hex or decimal)
+    wchar_t buf[32]; DWORD n = GetEnvironmentVariableW(L"EFZDA_CURRENT_PLAYER_OFFSET", buf, _countof(buf));
+    if (n > 0) {
+        wchar_t* end = nullptr; unsigned long v = wcstoul(buf, &end, 0);
+        if (v > 0 && v < 0x10000) return (uintptr_t)v;
+    }
+    EfzRevivalVersion v = DetectEfzRevivalVersion();
+    if (v == EfzRevivalVersion::Revival102i) return CURRENT_PLAYER_OFFSET_1_02i;
+    // default to 1.02h layout for others (including 1.02e observed the same here)
+    return CURRENT_PLAYER_OFFSET_1_02h;
+}
+
+// Version-aware NETPLAY win offsets (primary), with optional environment overrides
+static uintptr_t NetP1WinOffset() {
+    wchar_t buf[32]; DWORD n = GetEnvironmentVariableW(L"EFZDA_NET_P1_WIN_OFFSET", buf, _countof(buf));
+    if (n > 0) { wchar_t* end=nullptr; unsigned long v=wcstoul(buf,&end,0); if (v>0 && v<0x10000) return (uintptr_t)v; }
+    EfzRevivalVersion v = DetectEfzRevivalVersion();
+    if (v == EfzRevivalVersion::Revival102i) return P1_WIN_COUNT_OFFSET_1_02i;
+    return P1_WIN_COUNT_OFFSET_1_02h;
+}
+static uintptr_t NetP2WinOffset() {
+    wchar_t buf[32]; DWORD n = GetEnvironmentVariableW(L"EFZDA_NET_P2_WIN_OFFSET", buf, _countof(buf));
+    if (n > 0) { wchar_t* end=nullptr; unsigned long v=wcstoul(buf,&end,0); if (v>0 && v<0x10000) return (uintptr_t)v; }
+    EfzRevivalVersion v = DetectEfzRevivalVersion();
+    if (v == EfzRevivalVersion::Revival102i) return P2_WIN_COUNT_OFFSET_1_02i;
+    return P2_WIN_COUNT_OFFSET_1_02h;
+}
+
+// Version-aware nickname offsets (primary), with optional environment overrides
+static uintptr_t NickP1Offset() {
+    wchar_t buf[32]; DWORD n = GetEnvironmentVariableW(L"EFZDA_P1_NICK_OFFSET", buf, _countof(buf));
+    if (n > 0) { wchar_t* end=nullptr; unsigned long v=wcstoul(buf,&end,0); if (v>0 && v<0x10000) return (uintptr_t)v; }
+    EfzRevivalVersion v = DetectEfzRevivalVersion();
+    if (v == EfzRevivalVersion::Revival102i) return P1_NICKNAME_OFFSET_1_02i;
+    return P1_NICKNAME_OFFSET_1_02h;
+}
+static uintptr_t NickP2Offset() {
+    wchar_t buf[32]; DWORD n = GetEnvironmentVariableW(L"EFZDA_P2_NICK_OFFSET", buf, _countof(buf));
+    if (n > 0) { wchar_t* end=nullptr; unsigned long v=wcstoul(buf,&end,0); if (v>0 && v<0x10000) return (uintptr_t)v; }
+    EfzRevivalVersion v = DetectEfzRevivalVersion();
+    if (v == EfzRevivalVersion::Revival102i) return P2_NICKNAME_OFFSET_1_02i;
+    return P2_NICKNAME_OFFSET_1_02h;
+}
+
+// Version-aware tournament win offsets with optional environment overrides
+static uintptr_t TournP1WinOffset() {
+    wchar_t buf[32]; DWORD n = GetEnvironmentVariableW(L"EFZDA_TOURN_P1_WIN_OFFSET", buf, _countof(buf));
+    if (n > 0) {
+        wchar_t* end = nullptr; unsigned long v = wcstoul(buf, &end, 0);
+        if (v > 0 && v < 0x10000) return (uintptr_t)v;
+    }
+    EfzRevivalVersion v = DetectEfzRevivalVersion();
+    if (v == EfzRevivalVersion::Revival102i) return P1_TOURN_WIN_COUNT_OFFSET_1_02i;
+    // default for 1.02e/h and others
+    return P1_TOURN_WIN_COUNT_OFFSET_1_02h;
+}
+
+static uintptr_t TournP2WinOffset() {
+    wchar_t buf[32]; DWORD n = GetEnvironmentVariableW(L"EFZDA_TOURN_P2_WIN_OFFSET", buf, _countof(buf));
+    if (n > 0) {
+        wchar_t* end = nullptr; unsigned long v = wcstoul(buf, &end, 0);
+        if (v > 0 && v < 0x10000) return (uintptr_t)v;
+    }
+    EfzRevivalVersion v = DetectEfzRevivalVersion();
+    if (v == EfzRevivalVersion::Revival102i) return P2_TOURN_WIN_COUNT_OFFSET_1_02i;
+    return P2_TOURN_WIN_COUNT_OFFSET_1_02h;
 }
 
 static uintptr_t get_game_state_ptr(uintptr_t efzBase) {
@@ -292,7 +488,9 @@ static bool read_wide_string(void* addr, size_t maxChars, std::wstring& out) {
 
 static uintptr_t read_revival_ptr(uintptr_t revivalBase) {
     if (!revivalBase) return 0;
-    uintptr_t basePtrAddr = revivalBase + WIN_COUNT_BASE_OFFSET;
+    uintptr_t rva = RevivalWinsBaseRva();
+    if (!rva) return 0;
+    uintptr_t basePtrAddr = revivalBase + rva;
     uintptr_t ptr = 0;
     if (!safe_read(reinterpret_cast<void*>(basePtrAddr), ptr)) return 0;
     return ptr;
@@ -303,13 +501,13 @@ static std::string read_nickname(uintptr_t revivalBase, uintptr_t primaryOff, ui
     if (!ptr) return {};
     std::wstring w;
     // try primary (player) slot
-    if (read_wide_string(reinterpret_cast<void*>(ptr + primaryOff), 20, w) && !w.empty()) {
+    if (read_wide_string(reinterpret_cast<void*>(ptr + primaryOff), 26, w) && !w.empty()) {
         auto s = narrow(sanitize_nickname_w(w));
         if (!s.empty() && s != "Player" && s != "Player 1" && s != "Player 2") return s;
     }
     // fallback spectator mapping
     w.clear();
-    if (read_wide_string(reinterpret_cast<void*>(ptr + spectatorOff), 20, w) && !w.empty()) {
+    if (read_wide_string(reinterpret_cast<void*>(ptr + spectatorOff), 26, w) && !w.empty()) {
         auto s = narrow(sanitize_nickname_w(w));
         if (!s.empty()) return s;
     }
@@ -320,7 +518,13 @@ static int read_current_player_index(uintptr_t revivalBase) {
     uintptr_t ptr = read_revival_ptr(revivalBase);
     if (!ptr) return -1;
     int idx = -1;
-    if (!safe_read(reinterpret_cast<void*>(ptr + CURRENT_PLAYER_OFFSET), idx)) return -1;
+    static bool s_logged = false;
+    uintptr_t off = CurrentPlayerOffset();
+    if (!s_logged) {
+        s_logged = true;
+        efzda::log("[tick=%llu] CURRENT_PLAYER offset=0x%lX (ver=%d)", ticks(), (unsigned long)off, (int)DetectEfzRevivalVersion());
+    }
+    if (!safe_read(reinterpret_cast<void*>(ptr + off), idx)) return -1;
     if (idx == 0 || idx == 1) return idx;
     return -1;
 }
@@ -412,11 +616,9 @@ static std::string read_character_name(uintptr_t base, uintptr_t baseOffset) {
 
 static int read_win_count(uintptr_t revivalBase, uintptr_t offsetPrimary, uintptr_t offsetSpectator) {
     if (!revivalBase) return 0;
-    // [revivalBase + WIN_COUNT_BASE_OFFSET] -> ptr
-    uintptr_t winsBasePtrAddr = revivalBase + WIN_COUNT_BASE_OFFSET;
-    uintptr_t winsBase = 0;
-    if (!safe_read(reinterpret_cast<void*>(winsBasePtrAddr), winsBase) || winsBase == 0)
-        return 0;
+    // Use the version-aware RevivalWinsBaseRva via read_revival_ptr
+    uintptr_t winsBase = read_revival_ptr(revivalBase);
+    if (!winsBase) return 0;
 
     int val = 0;
     if (safe_read(reinterpret_cast<void*>(winsBase + offsetPrimary), val)) {
@@ -460,17 +662,67 @@ enum class OnlineState : int { Netplay = 0, Spectating = 1, Offline = 2, Tournam
 
 static OnlineState read_online_state(uintptr_t revivalBase) {
     if (!revivalBase) return OnlineState::Unknown;
-    int v = -1;
-    if (!safe_read(reinterpret_cast<void*>(revivalBase + REVIVAL_ONLINE_STATE_OFFSET), v))
-        return OnlineState::Unknown;
-    efzda::log("[tick=%llu] ONLINE state raw=%d addr=%p", ticks(), v, (void*)(revivalBase + REVIVAL_ONLINE_STATE_OFFSET));
-    switch (v) {
-        case 0: return OnlineState::Netplay;
-        case 1: return OnlineState::Spectating;
-        case 2: return OnlineState::Offline;
-        case 3: return OnlineState::Tournament;
-        default: return OnlineState::Unknown;
+    auto normalize = [](uint8_t x) -> OnlineState {
+        switch (x) {
+            case 0: return OnlineState::Netplay;
+            case 1: return OnlineState::Spectating;
+            case 2: return OnlineState::Offline;
+            case 3: return OnlineState::Tournament;
+            default: return OnlineState::Unknown;
+        }
+    };
+
+    // Primary: pointer chain EfzRevival.dll+0x26A4 -> ptr; read byte at ptr+offset
+    uintptr_t ptrRva = RevivalOnlineStatePtrRva();
+    uintptr_t basePtr = 0;
+    if (ptrRva && safe_read(reinterpret_cast<void*>(revivalBase + ptrRva), basePtr) && basePtr != 0) {
+        uintptr_t off1 = RevivalOnlineStateOffsetPrimary();
+        uint8_t v1 = 0xFF;
+        if (safe_read(reinterpret_cast<void*>(basePtr + off1), v1)) {
+            OnlineState s1 = normalize(v1);
+            efzda::log("[tick=%llu] ONLINE(ptr) raw=%u basePtr=%p off=0x%lX", ticks(), (unsigned)v1, (void*)basePtr, (unsigned long)off1);
+            if (s1 != OnlineState::Unknown) return s1;
+            // 1.02i sometimes stores flags in higher bits; try low 2 bits
+            if (DetectEfzRevivalVersion() == EfzRevivalVersion::Revival102i) {
+                uint8_t m = (uint8_t)(v1 & 0x03);
+                OnlineState sm = normalize(m);
+                if (sm != OnlineState::Unknown) {
+                    efzda::log("[tick=%llu] ONLINE(ptr) masked low2 raw=%u -> %u", ticks(), (unsigned)v1, (unsigned)m);
+                    return sm;
+                }
+            }
+        }
+        // Try alternate offset (0x370 vs 0x37C)
+        uintptr_t off2 = RevivalOnlineStateOffsetAlternate();
+        uint8_t v2 = 0xFF;
+        if (safe_read(reinterpret_cast<void*>(basePtr + off2), v2)) {
+            OnlineState s2 = normalize(v2);
+            efzda::log("[tick=%llu] ONLINE(ptr-alt) raw=%u basePtr=%p off=0x%lX", ticks(), (unsigned)v2, (void*)basePtr, (unsigned long)off2);
+            if (s2 != OnlineState::Unknown) return s2;
+            if (DetectEfzRevivalVersion() == EfzRevivalVersion::Revival102i) {
+                uint8_t m2 = (uint8_t)(v2 & 0x03);
+                OnlineState sm2 = normalize(m2);
+                if (sm2 != OnlineState::Unknown) {
+                    efzda::log("[tick=%llu] ONLINE(ptr-alt) masked low2 raw=%u -> %u", ticks(), (unsigned)v2, (unsigned)m2);
+                    return sm2;
+                }
+            }
+        }
+    } else {
+        efzda::log("[tick=%llu] ONLINE ptr base read failed ptrRva=0x%lX", ticks(), (unsigned long)ptrRva);
     }
+
+    // Fallback: direct RVA locations used previously
+    uintptr_t rva = RevivalOnlineStateRva();
+    if (rva) {
+        uint8_t v = 0xFF;
+        if (safe_read(reinterpret_cast<void*>(revivalBase + rva), v)) {
+            OnlineState s = normalize(v);
+            efzda::log("[tick=%llu] ONLINE(direct) raw=%u addr=%p", ticks(), (unsigned)v, (void*)(revivalBase + rva));
+            if (s != OnlineState::Unknown) return s;
+        }
+    }
+    return OnlineState::Unknown;
 }
 
 static const char* online_state_name(OnlineState s) {
@@ -810,10 +1062,65 @@ GameState GameStateProvider::get() {
     std::string p1Nick, p2Nick;
     int selfIdx = -1; // 0=P1, 1=P2, -1 unknown
     if (onl == OnlineState::Netplay || onl == OnlineState::Spectating || onl == OnlineState::Tournament) {
-        p1Wins = read_win_count(revivalBase, P1_WIN_COUNT_OFFSET, P1_WIN_COUNT_SPECTATOR_OFFSET);
-        p2Wins = read_win_count(revivalBase, P2_WIN_COUNT_OFFSET, P2_WIN_COUNT_SPECTATOR_OFFSET);
-        p1Nick = read_nickname(revivalBase, P1_NICKNAME_OFFSET, P1_NICKNAME_SPECTATOR_OFFSET);
-        p2Nick = read_nickname(revivalBase, P2_NICKNAME_OFFSET, P2_NICKNAME_SPECTATOR_OFFSET);
+        if (onl == OnlineState::Tournament) {
+            // 1.02i appears to store tournament counters differently; prefer plausible pair between standard and tournament.
+            EfzRevivalVersion ver = DetectEfzRevivalVersion();
+            if (ver == EfzRevivalVersion::Revival102i) {
+                int p1Std = read_win_count(revivalBase, NetP1WinOffset(), P1_WIN_COUNT_SPECTATOR_OFFSET);
+                int p2Std = read_win_count(revivalBase, NetP2WinOffset(), P2_WIN_COUNT_SPECTATOR_OFFSET);
+                int p1T = read_win_count(revivalBase, TournP1WinOffset(), P1_WIN_COUNT_SPECTATOR_OFFSET);
+                int p2T = read_win_count(revivalBase, TournP2WinOffset(), P2_WIN_COUNT_SPECTATOR_OFFSET);
+                auto plausible = [](int a, int b) { return (a >= 0 && b >= 0 && a <= 9 && b <= 9); };
+                bool stdOK = plausible(p1Std, p2Std);
+                bool tOK = plausible(p1T, p2T);
+                bool isCharSel = false; // detect via global screen already sampled above
+                {
+                    uint8_t tmp = 0xFF;
+                    if (read_screen_index(efzBase, tmp)) isCharSel = (tmp == (uint8_t)s_screenCharSel);
+                }
+                if (stdOK && !tOK) { p1Wins = p1Std; p2Wins = p2Std; efzda::log("[tick=%llu] WINS(1.02i): choose STANDARD std=%d-%d tourn=%d-%d", ticks(), p1Std, p2Std, p1T, p2T); }
+                else if (!stdOK && tOK) { p1Wins = p1T; p2Wins = p2T; efzda::log("[tick=%llu] WINS(1.02i): choose TOURNAMENT std=%d-%d tourn=%d-%d", ticks(), p1Std, p2Std, p1T, p2T); }
+                else if (stdOK && tOK) {
+                    // Prefer standard at character select, tournament during match
+                    if (isCharSel) { p1Wins = p1Std; p2Wins = p2Std; }
+                    else { p1Wins = p1T; p2Wins = p2T; }
+                    efzda::log("[tick=%llu] WINS(1.02i): both plausible, chose %s std=%d-%d tourn=%d-%d", ticks(), isCharSel ? "STANDARD" : "TOURNAMENT", p1Std, p2Std, p1T, p2T);
+                } else {
+                    // Neither looks right — default to standard to avoid outliers (e.g., 21-0)
+                    p1Wins = p1Std; p2Wins = p2Std;
+                    efzda::log("[tick=%llu] WINS(1.02i): neither plausible, default STANDARD std=%d-%d tourn=%d-%d", ticks(), p1Std, p2Std, p1T, p2T);
+                }
+            } else {
+                // 1.02e/h: tournament offsets stable
+                p1Wins = read_win_count(revivalBase, TournP1WinOffset(), P1_WIN_COUNT_SPECTATOR_OFFSET);
+                p2Wins = read_win_count(revivalBase, TournP2WinOffset(), P2_WIN_COUNT_SPECTATOR_OFFSET);
+            }
+        } else {
+            // Netplay/Spectating: use version-aware primary counters.
+            p1Wins = read_win_count(revivalBase, NetP1WinOffset(), P1_WIN_COUNT_SPECTATOR_OFFSET);
+            p2Wins = read_win_count(revivalBase, NetP2WinOffset(), P2_WIN_COUNT_SPECTATOR_OFFSET);
+            // Optional opt-in fallback via env if needed for diagnostics:
+            // EFZDA_ALLOW_TOURNAMENT_FALLBACK=1 will re-enable probing tournament counters when both are zero.
+            if (p1Wins == 0 && p2Wins == 0) {
+                static bool s_tfChecked = false;
+                static bool s_allowTournFallback = false;
+                if (!s_tfChecked) {
+                    wchar_t env[8];
+                    s_allowTournFallback = (GetEnvironmentVariableW(L"EFZDA_ALLOW_TOURNAMENT_FALLBACK", env, _countof(env)) > 0) && (wcstol(env, nullptr, 0) != 0);
+                    s_tfChecked = true;
+                }
+                if (s_allowTournFallback) {
+                    int t1 = read_win_count(revivalBase, TournP1WinOffset(), P1_WIN_COUNT_SPECTATOR_OFFSET);
+                    int t2 = read_win_count(revivalBase, TournP2WinOffset(), P2_WIN_COUNT_SPECTATOR_OFFSET);
+                    if ((t1 > 0 || t2 > 0) && t1 <= 99 && t2 <= 99) {
+                        efzda::log("[tick=%llu] WINS fallback to tournament offsets (env-enabled): p1=%d p2=%d", ticks(), t1, t2);
+                        p1Wins = t1; p2Wins = t2;
+                    }
+                }
+            }
+        }
+        p1Nick = read_nickname(revivalBase, NickP1Offset(), P1_NICKNAME_SPECTATOR_OFFSET);
+        p2Nick = read_nickname(revivalBase, NickP2Offset(), P2_NICKNAME_SPECTATOR_OFFSET);
         selfIdx = read_current_player_index(revivalBase);
     }
     if (p1Wins < 0 || p1Wins > 99) p1Wins = 0;
@@ -855,6 +1162,8 @@ GameState GameStateProvider::get() {
             // ensure no icons here until selection
             gs.largeImageKey.clear(); gs.largeImageText.clear();
             gs.smallImageKey.clear(); gs.smallImageText.clear();
+            // Show neutral scoreboard at char-select even without nicknames
+            gs.state = std::string("Score (") + std::to_string(p1Wins) + "-" + std::to_string(p2Wins) + ")";
         } else if (haveScreen && s_screenLoading >= 0 && screenIdx == (uint8_t)s_screenLoading) {
             gs.details = "Loading";
             gs.state = "Loading";
@@ -909,13 +1218,15 @@ GameState GameStateProvider::get() {
     int theirWins = (selfIdx == 1 ? p1Wins : p2Wins);
     if (oppChar.empty() && oppNick.empty()) {
         gs.state = "Waiting for the opponent...";
+        // Append score even while waiting/at character select
+        gs.state += " (" + std::to_string(ourWins) + "-" + std::to_string(theirWins) + ")";
     } else {
         std::string st;
         st.reserve(64);
         st += "Against ";
         if (oppChar.empty() && onl == OnlineState::Netplay && !oppNick.empty()) {
             // Fallback requested: "Against the <nickname>"
-            st += "the ";
+            //st += "the ";
             st += oppNick;
         } else {
             st += oppChar.empty() ? std::string("undefined") : oppChar;

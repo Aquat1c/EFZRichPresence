@@ -3,13 +3,14 @@
 Windows DLL mod that publishes Discord Rich Presence for Eternal Fighter Zero (EFZ).
 
 It reads EFZ state from process memory and integrates EfzRevival for online status, nicknames, current player side, and set scores.
+Currently supports 1.02e, 1.02h!!! and 1.02i!!! versions of EfzRevival.
 
 ## Features
 
 - Offline and online presence with clear details/state.
 - Characters and nicknames:
 	- Large image = your character; Small image = opponent character.
-	- If opponent character can’t be read in netplay, state becomes “Against the <nickname> …” and the small icon is omitted.
+	- If opponent character can’t be read in netplay, state becomes “Against <nickname> …” and the small icon is omitted.
 - Scores and orientation:
 	- Scores come from EfzRevival and are shown from your perspective as “(you-them)”.
 	- Score is always displayed online, starting at 0-0.
