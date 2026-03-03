@@ -112,43 +112,71 @@ void enable_console() {
     if (g_consoleEnabled)
         return;
     bool consoleReady = false;
+    const char* mode = "none";
 
-    // Prefer attaching to an existing parent console (e.g., if launched from a console)
-    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+    // If a console already exists in this process (for example provided by
+    // another mod), reuse it and avoid attach/alloc calls.
+    if (GetConsoleWindow() != nullptr) {
         consoleReady = true;
+        mode = "existing-process-console";
     } else {
-        DWORD err = GetLastError();
-        // ERROR_ACCESS_DENIED means we already have a console; treat as ready
-        if (err == ERROR_ACCESS_DENIED) {
+        // Prefer attaching to parent console when present.
+        if (AttachConsole(ATTACH_PARENT_PROCESS)) {
             consoleReady = true;
+            mode = "attached-parent-console";
         } else {
-            // Otherwise, allocate a new console
-            if (AllocConsole()) {
+            DWORD attachErr = GetLastError();
+            // ACCESS_DENIED can mean a console got attached between checks.
+            if (attachErr == ERROR_ACCESS_DENIED && GetConsoleWindow() != nullptr) {
                 consoleReady = true;
+                mode = "existing-process-console";
+            } else {
+                // Fallback: create our own console window.
+                if (AllocConsole()) {
+                    consoleReady = true;
+                    mode = "allocated-console";
+                } else {
+                    DWORD allocErr = GetLastError();
+                    // Another component may have created one just now.
+                    if (allocErr == ERROR_ACCESS_DENIED && GetConsoleWindow() != nullptr) {
+                        consoleReady = true;
+                        mode = "existing-process-console";
+                    } else {
+                        OutputDebugStringA("[EfzRichPresence] enable_console: failed to attach/alloc console\n");
+                    }
+                }
             }
         }
     }
 
-    if (consoleReady) {
-        // Set UTF-8 code pages for proper output of extended characters
-        SetConsoleOutputCP(CP_UTF8);
-        SetConsoleCP(CP_UTF8);
+    if (!consoleReady) return;
 
-        // Redirect standard streams to the console
-        FILE* fp;
-        freopen_s(&fp, "CONOUT$", "w", stdout);
-        freopen_s(&fp, "CONOUT$", "w", stderr);
-        freopen_s(&fp, "CONIN$",  "r", stdin);
+    // Set UTF-8 code pages for proper output of extended characters.
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
 
-    // Optional: ensure C++ iostreams are in sync with C stdio (set to false for perf)
+    // Redirect standard streams to whatever console we are attached to.
+    FILE* fpOut = nullptr;
+    FILE* fpErr = nullptr;
+    FILE* fpIn = nullptr;
+    errno_t rcOut = freopen_s(&fpOut, "CONOUT$", "w", stdout);
+    errno_t rcErr = freopen_s(&fpErr, "CONOUT$", "w", stderr);
+    errno_t rcIn = freopen_s(&fpIn, "CONIN$",  "r", stdin);
+    if (rcOut != 0 || rcErr != 0 || rcIn != 0) {
+        OutputDebugStringA("[EfzRichPresence] enable_console: stdio redirection partially failed\n");
+    }
+
+    // Keep iostream and stdio behavior predictable.
     std::ios::sync_with_stdio(false);
 
     SetConsoleTitleW(L"EFZ Rich Presence Logs");
-        g_consoleEnabled = true;
+    g_consoleEnabled = true;
 
-        std::fputs("[logger] Console enabled\n", stdout);
-        std::fflush(stdout);
-    }
+    std::fputs("[logger] Console enabled\n", stdout);
+    std::fflush(stdout);
+    char msg[128];
+    std::snprintf(msg, sizeof(msg), "[EfzRichPresence] enable_console: %s\n", mode);
+    OutputDebugStringA(msg);
 }
 
 // When logging is disabled at compile time, provide no-op versions
