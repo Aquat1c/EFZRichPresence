@@ -3,11 +3,16 @@
 Windows DLL mod that publishes Discord Rich Presence for Eternal Fighter Zero (EFZ).
 
 It reads EFZ state from process memory and integrates EfzRevival for online status, nicknames, current player side, and set scores.
-Currently supports 1.02e, 1.02h!!! and 1.02i!!! versions of EfzRevival.
+Currently supports 1.02e, 1.02f, 1.02g, 1.02h!!! and 1.02i!!! versions of EfzRevival.
 
 ## Features
 
 - Offline and online presence with clear details/state.
+- Netplay export integration (`EFZNetplay_State`) when `efz_netplay_mod` is loaded:
+	- Distinct Hosting / Joining / Spectating / Tournament session states.
+	- Netplay menu presence and sub-screen tracking (`Main/Host/Join/Nickname/Lobby`).
+	- Explicit netplay activity-phase tracking (v4): menu / connecting / delay setup / character select / loading / match.
+	- Connected/connecting/failed/session-ended phase tracking for online sessions.
 - Characters and nicknames:
 	- Large image = your character; Small image = opponent character.
 	- If opponent character can’t be read in netplay, state becomes “Against <nickname> …” and the small icon is omitted.
@@ -19,27 +24,42 @@ Currently supports 1.02e, 1.02h!!! and 1.02i!!! versions of EfzRevival.
 	- Offline matches: “Playing in <Mode>”, state “As <P1>”.
 	- Main Menu shows a generic EFZ icon.
 	- Online pre-pick (before your character is chosen) shows a generic EFZ logo as the large image.
-## Build (Visual Studio 2022 + CMake)
+## Build (Visual Studio + CMake)
 
-1. Ensure you have CMake 3.20+ and MSVC (VS 2022) installed.
-2. Configure and build the Win32 (x86) preset:
+1. Ensure you have CMake 3.20+ and MSVC installed (VS 2022 or VS 2026).
+2. Configure and build the Win32 (x86) preset matching your installed VS:
 
 ```powershell
+# VS 2026
+cmake --preset vs2026-Win32
+cmake --build --preset vs2026-Win32
+cmake --build --preset vs2026-Win32-debug
+
+# VS 2022
 cmake --preset vs2022-Win32
 cmake --build --preset vs2022-Win32
+cmake --build --preset vs2022-Win32-debug
 ```
 
 Artifacts will appear under:
 
 ```
-out/build/vs2022-Win32/bin/RelWithDebInfo/EfzRichPresence.dll
+out/build/<preset>/bin/RelWithDebInfo/EfzRichPresence.dll
+out/build/<preset>/bin/Debug/EfzRichPresence.dll
 ```
 
 Alternatively, configure manually:
 
 ```powershell
-cmake -S . -B out/build/vs2022-Win32 -G "Visual Studio 17 2022" -A Win32 -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build out/build/vs2022-Win32 --config RelWithDebInfo --target EfzRichPresence
+cmake -S . -B out/build/vs2026-Win32 -G "Visual Studio 18 2026" -A Win32
+cmake --build out/build/vs2026-Win32 --config RelWithDebInfo --target EfzRichPresence
+cmake --build out/build/vs2026-Win32 --config Debug --target EfzRichPresence
+```
+
+Logging can be toggled at configure time:
+
+```powershell
+cmake -S . -B out/build/vs2026-Win32 -G "Visual Studio 18 2026" -A Win32 -DEFZDA_ENABLE_LOGGING=ON
 ```
 
 ## Installation
@@ -64,6 +84,12 @@ Windows games under Wine/Proton can’t talk to the native Linux Discord UNIX so
 		- Add to Launch Options: `EFZDA_WINE_BRIDGE=/path/to/winediscordipcbridge %command%`
 
 If the Discord pipe isn’t available at startup, the DLL will attempt to spawn the bridge and reconnect a few times.
+
+## Debug logging
+
+- File logs are enabled by default (`EFZDA_ENABLE_LOGGING=ON`) and written to `EfzRichPresence.log` beside the DLL (falls back to `%TEMP%` if unwritable).
+- Enable live console output by setting `EFZDA_ENABLE_CONSOLE=1` before launching EFZ.
+- Netplay transition lines use the `NPTransition:` prefix and show mode/phase/activity/menu/charselect/match/session transitions.
 ## Runtime behavior (details/state)
 
 - Offline

@@ -82,5 +82,13 @@ if (EFZ_ENABLE_CONSOLE)
     target_compile_definitions(EfzRichPresence PRIVATE EFZ_ENABLE_CONSOLE)
 endif()
 
+# File/debug logger switch
+option(EFZDA_ENABLE_LOGGING "Enable EfzRichPresence logging" ON)
+if (EFZDA_ENABLE_LOGGING)
+    target_compile_definitions(EfzRichPresence PRIVATE EFZDA_ENABLE_LOGGING=1)
+else()
+    target_compile_definitions(EfzRichPresence PRIVATE EFZDA_ENABLE_LOGGING=0)
+endif()
+
 # Install (optional)
 install(TARGETS EfzRichPresence RUNTIME DESTINATION . LIBRARY DESTINATION .)

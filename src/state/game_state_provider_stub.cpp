@@ -12,7 +12,10 @@
 #include <cwctype>
 #include <type_traits>
 #include <cstdio>
+#include <cstddef>
+#include <cstring>
 #include "logger.h"
+#include "efz_netplay_state.h"
 
 namespace efzda {
 
@@ -26,9 +29,9 @@ constexpr uintptr_t EFZ_GLOBAL_SCREEN_INDEX_OFFSET = 0x390148; // byte: current 
 constexpr uintptr_t CHARACTER_NAME_OFFSET = 0x94;
 
 // EfzRevival version-aware RVAs
-// 1.02e: wins-base ptr RVA=0x00A02CC, online-state RVA=0x00A05D0
-// 1.02h: wins-base ptr RVA=0x00A02EC, online-state RVA=0x00A05F0
-// 1.02i: wins-base ptr RVA=0x00A15F8, online-state RVA=0x00A15FC
+// 1.02e/f/g: wins-base ptr RVA=0x00A02CC, online-state RVA=0x00A05D0
+// 1.02h:     wins-base ptr RVA=0x00A02EC, online-state RVA=0x00A05F0
+// 1.02i:     wins-base ptr RVA=0x00A15F8, online-state RVA=0x00A15FC
 constexpr uintptr_t P1_WIN_COUNT_OFFSET_1_02h = 0x4C8;
 constexpr uintptr_t P2_WIN_COUNT_OFFSET_1_02h = 0x4CC;
 constexpr uintptr_t P1_WIN_COUNT_OFFSET_1_02i = 0x4D0; // from CE table (netplay)
@@ -118,7 +121,36 @@ bool safe_read_bytes(const void* addr, void* buffer, size_t size) {
 }
 
 // --- EfzRevival version detection and RVA selection ---
-enum class EfzRevivalVersion : int { Unknown = 0, Vanilla, Revival102e, Revival102h, Revival102i, Other };
+enum class EfzRevivalVersion : int { Unknown = 0, Vanilla, Revival102e, Revival102f, Revival102g, Revival102h, Revival102i, Other };
+
+// PE TimeDateStamp values from decompilation/release inventory (used by netplay mod too)
+constexpr DWORD REVIVAL_TS_102E = 0x5EA876B0;
+constexpr DWORD REVIVAL_TS_102F = 0x5F8C58A3;
+constexpr DWORD REVIVAL_TS_102G = 0x6240CE73;
+constexpr DWORD REVIVAL_TS_102H = 0x62929371;
+constexpr DWORD REVIVAL_TS_102I = 0x63BF27EA;
+
+static EfzRevivalVersion DetectEfzRevivalVersionByTimestamp() {
+    HMODULE revival = GetModuleHandleW(L"EfzRevival.dll");
+    if (!revival) return EfzRevivalVersion::Unknown;
+
+    auto base = reinterpret_cast<const unsigned char*>(revival);
+    auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE) return EfzRevivalVersion::Unknown;
+    if (dos->e_lfanew <= 0) return EfzRevivalVersion::Unknown;
+
+    auto nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
+    if (!nt || nt->Signature != IMAGE_NT_SIGNATURE) return EfzRevivalVersion::Unknown;
+
+    switch (nt->FileHeader.TimeDateStamp) {
+        case REVIVAL_TS_102E: return EfzRevivalVersion::Revival102e;
+        case REVIVAL_TS_102F: return EfzRevivalVersion::Revival102f;
+        case REVIVAL_TS_102G: return EfzRevivalVersion::Revival102g;
+        case REVIVAL_TS_102H: return EfzRevivalVersion::Revival102h;
+        case REVIVAL_TS_102I: return EfzRevivalVersion::Revival102i;
+        default: return EfzRevivalVersion::Unknown;
+    }
+}
 
 static BOOL CALLBACK EnumWindowsProcFindSelf(HWND hwnd, LPARAM lParam) {
     DWORD pid = 0; GetWindowThreadProcessId(hwnd, &pid);
@@ -139,6 +171,12 @@ static EfzRevivalVersion DetectEfzRevivalVersion() {
     static std::atomic<int> s_cached{-1}; // -1 = unresolved, else EfzRevivalVersion
     int v = s_cached.load(std::memory_order_acquire);
     if (v != -1) return static_cast<EfzRevivalVersion>(v);
+    // Prefer module timestamp (stable across title/localization changes).
+    EfzRevivalVersion byTs = DetectEfzRevivalVersionByTimestamp();
+    if (byTs != EfzRevivalVersion::Unknown) {
+        s_cached.store(static_cast<int>(byTs), std::memory_order_release);
+        return byTs;
+    }
     HWND hwnd = FindMainWindowForSelf();
     if (!hwnd) {
         return EfzRevivalVersion::Unknown; // keep unresolved to retry
@@ -155,6 +193,8 @@ static EfzRevivalVersion DetectEfzRevivalVersion() {
     EfzRevivalVersion ver = EfzRevivalVersion::Vanilla;
     if (lower.find("-revival-") != std::string::npos) {
         if (lower.find("1.02e") != std::string::npos) ver = EfzRevivalVersion::Revival102e;
+        else if (lower.find("1.02f") != std::string::npos) ver = EfzRevivalVersion::Revival102f;
+        else if (lower.find("1.02g") != std::string::npos) ver = EfzRevivalVersion::Revival102g;
         else if (lower.find("1.02h") != std::string::npos) ver = EfzRevivalVersion::Revival102h;
         else if (lower.find("1.02i") != std::string::npos) ver = EfzRevivalVersion::Revival102i;
         else ver = EfzRevivalVersion::Other;
@@ -175,6 +215,8 @@ static uintptr_t RevivalWinsBaseRva() {
     EfzRevivalVersion v = DetectEfzRevivalVersion();
     switch (v) {
         case EfzRevivalVersion::Revival102e: return 0x00A02CC;
+        case EfzRevivalVersion::Revival102f: return 0x00A02CC;
+        case EfzRevivalVersion::Revival102g: return 0x00A02CC;
         case EfzRevivalVersion::Revival102h: return 0x00A02EC;
         case EfzRevivalVersion::Revival102i: return 0x00A15F8;
         default: return 0; // Vanilla/Other/Unknown
@@ -191,6 +233,8 @@ static uintptr_t RevivalOnlineStateRva() {
     EfzRevivalVersion v = DetectEfzRevivalVersion();
     switch (v) {
         case EfzRevivalVersion::Revival102e: return 0x00A05D0;
+        case EfzRevivalVersion::Revival102f: return 0x00A05D0;
+        case EfzRevivalVersion::Revival102g: return 0x00A05D0;
         case EfzRevivalVersion::Revival102h: return 0x00A05F0;
         case EfzRevivalVersion::Revival102i: return 0x00A15FC;
         default: return 0; // Vanilla/Other/Unknown
@@ -238,7 +282,7 @@ static uintptr_t CurrentPlayerOffset() {
     }
     EfzRevivalVersion v = DetectEfzRevivalVersion();
     if (v == EfzRevivalVersion::Revival102i) return CURRENT_PLAYER_OFFSET_1_02i;
-    // default to 1.02h layout for others (including 1.02e observed the same here)
+    // default to 1.02e/f/g/h layout for others (same observed layout for these fields)
     return CURRENT_PLAYER_OFFSET_1_02h;
 }
 
@@ -735,6 +779,335 @@ static const char* online_state_name(OnlineState s) {
     }
 }
 
+// ---- efz_netplay_mod exported state (shared memory / DLL export) ----
+constexpr uint32_t EFZ_NETPLAY_STATE_LEGACY_MIN_V1_SIZE = 204u; // pre-lastUpdateTick legacy layout
+
+struct NetplayExportState {
+    bool valid = false;
+    bool fromSharedMemory = false;
+    bool fromDllExport = false;
+    bool hasCapabilityFlags = false;
+    bool hasActivityPhase = false;
+    bool hasEndReason = false;
+    bool hasCharSelectContext = false;
+    bool hasMatchContext = false;
+    uint32_t version = 0;
+    uint32_t structSize = 0;
+    uint32_t lastUpdateTick = 0;
+    uint32_t capabilityFlags = 0;
+    uint32_t stateSeq = 0;
+    uint32_t sessionId = 0;
+    uint32_t setId = 0;
+    int32_t sessionMode = 0;
+    int32_t sessionPhase = 0;
+    int32_t localSide = -1;
+    int32_t p1Wins = 0;
+    int32_t p2Wins = 0;
+    int32_t matchCounter = 0;
+    int32_t pingMs = -1;
+    int32_t rollbackFrames = -1;
+    bool inNetplayMenu = false;
+    uint8_t netplayMenuScreen = 0;
+    bool inNetplayCharacterSelect = false;
+    bool inNetplayMatch = false;
+    uint8_t activityPhase = EFZ_ACTIVITY_IDLE;
+    uint8_t endReason = EFZ_END_NONE;
+    uint8_t p1CharId = 0xFF;
+    uint8_t p2CharId = 0xFF;
+    bool p1Locked = false;
+    bool p2Locked = false;
+    uint8_t localCursorCharId = 0xFF;
+    uint8_t stageId = 0xFF;
+    uint8_t roundIndex = 0xFF;
+    bool isRoundActive = false;
+    uint16_t roundTimerFrames = 0xFFFF;
+    std::string localNickname;
+    std::string p1Name;
+    std::string p2Name;
+    std::string revivalVersion;
+};
+
+static HANDLE s_npMapHandle = nullptr;
+static const unsigned char* s_npMapView = nullptr;
+static ULONGLONG s_npLastOpenAttempt = 0;
+
+static void close_netplay_state_map() {
+    if (s_npMapView) {
+        UnmapViewOfFile(s_npMapView);
+        s_npMapView = nullptr;
+    }
+    if (s_npMapHandle) {
+        CloseHandle(s_npMapHandle);
+        s_npMapHandle = nullptr;
+    }
+}
+
+static HMODULE find_netplay_mod() {
+    HMODULE mod = GetModuleHandleA("efz_netplay_mod");
+    if (!mod) mod = GetModuleHandleA("efz_netplay_mod.dll");
+    return mod;
+}
+
+static bool ensure_netplay_state_map_open() {
+    if (s_npMapView) return true;
+    ULONGLONG now = GetTickCount64();
+    if (now - s_npLastOpenAttempt < 1000ULL) return false;
+    s_npLastOpenAttempt = now;
+
+    HANDLE hMap = OpenFileMappingA(FILE_MAP_READ, FALSE, EFZ_NETPLAY_STATE_SHM_NAME);
+    if (!hMap) return false;
+    void* view = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+    if (!view) {
+        CloseHandle(hMap);
+        return false;
+    }
+    s_npMapHandle = hMap;
+    s_npMapView = reinterpret_cast<const unsigned char*>(view);
+    return true;
+}
+
+static bool read_u32(const unsigned char* p, size_t off, uint32_t& out) {
+    if (!p) return false;
+    std::memcpy(&out, p + off, sizeof(out));
+    return true;
+}
+
+static bool read_i32_from_struct(const unsigned char* base, uint32_t structSize, size_t off, int32_t& out) {
+    if (!base || off + sizeof(int32_t) > structSize) return false;
+    std::memcpy(&out, base + off, sizeof(out));
+    return true;
+}
+
+static std::string sanitize_cstr(const char* p, size_t maxLen) {
+    if (!p || maxLen == 0) return {};
+    size_t len = 0;
+    while (len < maxLen && p[len] != '\0') ++len;
+    std::string s(p, p + len);
+    s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) { return c < 0x20; }), s.end());
+    return s;
+}
+
+static std::string read_cstr_from_struct(const unsigned char* base, uint32_t structSize, size_t off, size_t maxLen) {
+    if (!base || off >= structSize || maxLen == 0) return {};
+    size_t n = static_cast<size_t>(structSize) - off;
+    if (n > maxLen) n = maxLen;
+    return sanitize_cstr(reinterpret_cast<const char*>(base + off), n);
+}
+
+static bool parse_netplay_export_state_current(const unsigned char* base, uint32_t structSize, uint32_t version32, NetplayExportState& out) {
+    EFZNetplayState typed{};
+    const size_t toCopy = (std::min)(static_cast<size_t>(structSize), sizeof(EFZNetplayState));
+    std::memcpy(&typed, base, toCopy);
+
+    out.version = version32;
+    out.structSize = structSize;
+    out.lastUpdateTick = typed.lastUpdateTick;
+    out.sessionMode = typed.sessionMode;
+    out.sessionPhase = typed.sessionPhase;
+    out.localSide = typed.localSide;
+    out.p1Wins = typed.p1Wins;
+    out.p2Wins = typed.p2Wins;
+    out.matchCounter = typed.matchCounter;
+    out.localNickname = sanitize_cstr(typed.localNickname, sizeof(typed.localNickname));
+    out.p1Name = sanitize_cstr(typed.p1Name, sizeof(typed.p1Name));
+    out.p2Name = sanitize_cstr(typed.p2Name, sizeof(typed.p2Name));
+    out.pingMs = typed.pingMs;
+    out.rollbackFrames = typed.rollbackFrames;
+
+    if (structSize > offsetof(EFZNetplayState, inNetplayMenu)) {
+        out.inNetplayMenu = (typed.inNetplayMenu != 0);
+    }
+    if (structSize > offsetof(EFZNetplayState, netplayMenuScreen)) {
+        out.netplayMenuScreen = typed.netplayMenuScreen;
+    }
+    if (structSize > offsetof(EFZNetplayState, revivalVersion)) {
+        out.revivalVersion = sanitize_cstr(typed.revivalVersion, sizeof(typed.revivalVersion));
+    }
+    if (structSize > offsetof(EFZNetplayState, inNetplayCharacterSelect)) {
+        out.inNetplayCharacterSelect = (typed.inNetplayCharacterSelect != 0);
+    }
+    if (structSize > offsetof(EFZNetplayState, inNetplayMatch)) {
+        out.inNetplayMatch = (typed.inNetplayMatch != 0);
+    }
+    if (structSize >= offsetof(EFZNetplayState, capabilityFlags) + sizeof(typed.capabilityFlags)) {
+        out.capabilityFlags = typed.capabilityFlags;
+        out.hasCapabilityFlags = true;
+    }
+    if (structSize >= offsetof(EFZNetplayState, stateSeq) + sizeof(typed.stateSeq)) {
+        out.stateSeq = typed.stateSeq;
+    }
+    if (structSize >= offsetof(EFZNetplayState, sessionId) + sizeof(typed.sessionId)) {
+        out.sessionId = typed.sessionId;
+    }
+    if (structSize >= offsetof(EFZNetplayState, setId) + sizeof(typed.setId)) {
+        out.setId = typed.setId;
+    }
+    if (structSize >= offsetof(EFZNetplayState, activityPhase) + sizeof(typed.activityPhase)) {
+        out.activityPhase = typed.activityPhase;
+        out.hasActivityPhase = true;
+    }
+    if (structSize >= offsetof(EFZNetplayState, endReason) + sizeof(typed.endReason)) {
+        out.endReason = typed.endReason;
+        out.hasEndReason = true;
+    }
+    if (structSize >= offsetof(EFZNetplayState, localCursorCharId) + sizeof(typed.localCursorCharId)) {
+        out.p1CharId = typed.p1CharId;
+        out.p2CharId = typed.p2CharId;
+        out.p1Locked = (typed.p1Locked != 0);
+        out.p2Locked = (typed.p2Locked != 0);
+        out.localCursorCharId = typed.localCursorCharId;
+        out.hasCharSelectContext = true;
+    }
+    if (structSize >= offsetof(EFZNetplayState, roundTimerFrames) + sizeof(typed.roundTimerFrames)) {
+        out.stageId = typed.stageId;
+        out.roundIndex = typed.roundIndex;
+        out.isRoundActive = (typed.isRoundActive != 0);
+        out.roundTimerFrames = typed.roundTimerFrames;
+        out.hasMatchContext = true;
+    }
+    out.valid = true;
+    return true;
+}
+
+static bool parse_netplay_export_state_legacy(const unsigned char* base, uint32_t structSize, uint32_t version32, NetplayExportState& out) {
+    // Legacy layout from NETPLAY_STATE_EXPORT.md before lastUpdateTick field:
+    // header (12), then sessionMode at +12.
+    if (structSize < EFZ_NETPLAY_STATE_LEGACY_MIN_V1_SIZE) return false;
+
+    out.version = version32;
+    out.structSize = structSize;
+    if (!read_i32_from_struct(base, structSize, 12, out.sessionMode)) return false;
+    if (!read_i32_from_struct(base, structSize, 16, out.sessionPhase)) return false;
+    if (!read_i32_from_struct(base, structSize, 20, out.localSide)) return false;
+    if (!read_i32_from_struct(base, structSize, 24, out.p1Wins)) return false;
+    if (!read_i32_from_struct(base, structSize, 28, out.p2Wins)) return false;
+    if (!read_i32_from_struct(base, structSize, 32, out.matchCounter)) return false;
+    out.localNickname = read_cstr_from_struct(base, structSize, 36, 32);
+    out.p1Name = read_cstr_from_struct(base, structSize, 68, 64);
+    out.p2Name = read_cstr_from_struct(base, structSize, 132, 64);
+    (void)read_i32_from_struct(base, structSize, 196, out.pingMs);
+    (void)read_i32_from_struct(base, structSize, 200, out.rollbackFrames);
+    if (204 < structSize) out.inNetplayMenu = (base[204] != 0);
+    if (205 < structSize) out.netplayMenuScreen = base[205];
+    if (206 < structSize) out.revivalVersion = read_cstr_from_struct(base, structSize, 206, 16);
+    // v3/v4 fields are appended after revivalVersion in the public struct and are
+    // read via parse_netplay_export_state_current() when structSize is large enough.
+    out.valid = true;
+    return true;
+}
+
+static bool parse_netplay_export_state(const void* statePtr, NetplayExportState& out) {
+    out = NetplayExportState{};
+    if (!statePtr) return false;
+
+    const unsigned char* base = reinterpret_cast<const unsigned char*>(statePtr);
+    uint32_t magic = 0;
+    uint32_t version32 = 0;
+    uint32_t structSize = 0;
+    if (!read_u32(base, 0, magic)) return false;
+    if (magic != EFZ_NETPLAY_STATE_MAGIC) return false;
+    if (!read_u32(base, 4, version32)) return false;
+    if (!read_u32(base, 8, structSize)) return false;
+    if (structSize < EFZ_NETPLAY_STATE_LEGACY_MIN_V1_SIZE || structSize > 4096) return false;
+
+    // Prefer typed parse from the public header layout; legacy fallback kept for older maps.
+    if (structSize >= offsetof(EFZNetplayState, rollbackFrames) + sizeof(int32_t)) {
+        if (parse_netplay_export_state_current(base, structSize, version32, out)) return true;
+    }
+    return parse_netplay_export_state_legacy(base, structSize, version32, out);
+}
+
+using NetplayGetStateFn = const void* (__cdecl *)(void);
+
+static bool read_netplay_export_state(NetplayExportState& out) {
+    // Preferred path: named shared memory.
+    if (ensure_netplay_state_map_open()) {
+        if (parse_netplay_export_state(s_npMapView, out)) {
+            out.fromSharedMemory = true;
+            return true;
+        }
+    }
+
+    // Fallback path: exported function.
+    HMODULE mod = find_netplay_mod();
+    if (mod) {
+        auto fn = reinterpret_cast<NetplayGetStateFn>(GetProcAddress(mod, "EFZNetplay_GetState"));
+        if (fn) {
+            const void* p = fn();
+            if (parse_netplay_export_state(p, out)) {
+                out.fromDllExport = true;
+                return true;
+            }
+        }
+    } else {
+        // If netplay mod is gone, close stale map handle so we can re-open cleanly later.
+        close_netplay_state_map();
+    }
+
+    return false;
+}
+
+static const char* netplay_menu_screen_name(uint8_t id) {
+    switch (id) {
+        case EFZ_MENU_MAIN: return "Main menu";
+        case EFZ_MENU_HOST: return "Host menu";
+        case EFZ_MENU_JOIN: return "Join menu";
+        case EFZ_MENU_NICKNAME: return "Nickname menu";
+        case EFZ_MENU_LOBBY: return "Lobby menu";
+        default: return "Netplay menu";
+    }
+}
+
+static const char* netplay_phase_name(int32_t phase) {
+    switch (phase) {
+        case EFZ_PHASE_IDLE: return "Idle";
+        case EFZ_PHASE_CONNECTING: return "Connecting";
+        case EFZ_PHASE_DELAY_SETUP: return "Delay setup";
+        case EFZ_PHASE_CONNECTED: return "Connected";
+        case EFZ_PHASE_FAILED: return "Failed";
+        case EFZ_PHASE_SESSION_ENDED: return "Session ended";
+        default: return "Unknown";
+    }
+}
+
+static const char* netplay_mode_name(int32_t mode) {
+    switch (mode) {
+        case EFZ_SESSION_NONE: return "None";
+        case EFZ_SESSION_HOSTING: return "Hosting";
+        case EFZ_SESSION_JOINING: return "Joining";
+        case EFZ_SESSION_SPECTATING: return "Spectating";
+        case EFZ_SESSION_TOURNAMENT: return "Tournament";
+        default: return "Unknown";
+    }
+}
+
+static const char* netplay_activity_name(uint8_t activity) {
+    switch (activity) {
+        case EFZ_ACTIVITY_IDLE: return "Idle";
+        case EFZ_ACTIVITY_MENU: return "Menu";
+        case EFZ_ACTIVITY_CONNECTING: return "Connecting";
+        case EFZ_ACTIVITY_DELAY_SETUP: return "Delay setup";
+        case EFZ_ACTIVITY_CHAR_SELECT: return "Character select";
+        case EFZ_ACTIVITY_LOADING: return "Loading";
+        case EFZ_ACTIVITY_MATCH: return "Match";
+        case EFZ_ACTIVITY_RESULTS: return "Results";
+        default: return "Unknown";
+    }
+}
+
+static const char* netplay_end_reason_name(uint8_t reason) {
+    switch (reason) {
+        case EFZ_END_NONE: return "None";
+        case EFZ_END_GRACEFUL: return "Graceful";
+        case EFZ_END_DISCONNECT: return "Disconnected";
+        case EFZ_END_CANCELLED: return "Cancelled";
+        case EFZ_END_CONNECT_FAILED: return "Connect failed";
+        case EFZ_END_PEER_PROCESS_DIED: return "Peer process ended";
+        case EFZ_END_UNKNOWN: return "Unknown";
+        default: return "Unknown";
+    }
+}
+
 // Map display character name to Discord small image asset key (Dev Portal)
 static std::string map_char_to_small_icon_key(const std::string& displayName) {
     // Lowercase copy
@@ -803,11 +1176,23 @@ GameState GameStateProvider::get() {
     static int s_spawnedFrames = 0;
     static int s_unspawnedFrames = 0;
     static bool s_waitOnlineNicknames = false;    // online reported but no nicknames yet
+    // Export-side nickname cache to survive transient empty frames from netplay mod.
+    static uint32_t s_exportNickSessionId = 0;
+    static std::string s_exportP1NickCache;
+    static std::string s_exportP2NickCache;
 
     // Determine module bases
     uintptr_t efzBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)); // main module (efz.exe) in same process
     HMODULE revivalMod = GetModuleHandleW(L"EfzRevival.dll");
     uintptr_t revivalBase = reinterpret_cast<uintptr_t>(revivalMod);
+    HMODULE netplayMod = find_netplay_mod();
+    static bool s_lastNetplayModLoaded = false;
+    bool netplayModLoaded = (netplayMod != nullptr);
+    if (netplayModLoaded != s_lastNetplayModLoaded) {
+        s_lastNetplayModLoaded = netplayModLoaded;
+        log("GSPoll#%lu: efz_netplay_mod %s", s_poll, netplayModLoaded ? "detected" : "not detected");
+        if (!netplayModLoaded) close_netplay_state_map();
+    }
     // Allow disabling all EfzRevival usage via environment for debugging
     wchar_t disableEnv[8];
     if (GetEnvironmentVariableW(L"EFZDA_DISABLE_REVIVAL", disableEnv, _countof(disableEnv)) > 0) {
@@ -858,6 +1243,165 @@ GameState GameStateProvider::get() {
     uint8_t gmRaw = read_game_mode(efzBase);
     const char* gmName = game_mode_name(gmRaw);
     OnlineState onl = read_online_state(revivalBase);
+    NetplayExportState np{};
+    bool haveNetplayExport = read_netplay_export_state(np);
+    static bool s_lastNetplayExport = false;
+    static bool s_lastNetplayExportShared = false;
+    static std::string s_lastNetplayRevivalVersion;
+    if (haveNetplayExport != s_lastNetplayExport ||
+        (haveNetplayExport && np.fromSharedMemory != s_lastNetplayExportShared)) {
+        s_lastNetplayExport = haveNetplayExport;
+        s_lastNetplayExportShared = haveNetplayExport ? np.fromSharedMemory : false;
+        if (haveNetplayExport) {
+            log("GSPoll#%lu: netplay state export active (source=%s ver=%u size=%u)",
+                s_poll,
+                np.fromSharedMemory ? "shared-memory" : "dll-export",
+                (unsigned)np.version,
+                (unsigned)np.structSize);
+        } else {
+            log("GSPoll#%lu: netplay state export unavailable", s_poll);
+        }
+    }
+    if (haveNetplayExport && np.revivalVersion != s_lastNetplayRevivalVersion) {
+        s_lastNetplayRevivalVersion = np.revivalVersion;
+        log("GSPoll#%lu: netplay export revivalVersion='%s'",
+            s_poll, s_lastNetplayRevivalVersion.c_str());
+    }
+    static bool s_npTransitionKnown = false;
+    static int32_t s_npLastMode = 0;
+    static int32_t s_npLastPhase = 0;
+    static uint8_t s_npLastActivity = 0;
+    static uint8_t s_npLastEndReason = 0;
+    static bool s_npLastMenu = false;
+    static uint8_t s_npLastMenuScreen = 0;
+    static bool s_npLastCharSelect = false;
+    static bool s_npLastMatch = false;
+    static uint32_t s_npLastSessionId = 0;
+    static uint32_t s_npLastSetId = 0;
+    static bool s_npSeqKnown = false;
+    static uint32_t s_npLastSeqObserved = 0;
+    static ULONGLONG s_npLastSeqChangeAt = 0;
+    static bool s_npSeqWasStale = false;
+    bool npStateLikelyStale = false;
+    if (haveNetplayExport) {
+        ULONGLONG nowTick = GetTickCount64();
+        if (!s_npSeqKnown || np.stateSeq != s_npLastSeqObserved) {
+            s_npSeqKnown = true;
+            s_npLastSeqObserved = np.stateSeq;
+            s_npLastSeqChangeAt = nowTick;
+            if (s_npSeqWasStale) {
+                log("GSPoll#%lu: netplay export state resumed (seq=%u)", s_poll, (unsigned)np.stateSeq);
+            }
+            s_npSeqWasStale = false;
+        } else if (s_npSeqKnown && (nowTick - s_npLastSeqChangeAt) > 1500ULL) {
+            npStateLikelyStale = true;
+            if (!s_npSeqWasStale) {
+                log("GSPoll#%lu: netplay export state appears stale (seq=%u unchanged for %llums)",
+                    s_poll, (unsigned)np.stateSeq, (unsigned long long)(nowTick - s_npLastSeqChangeAt));
+                s_npSeqWasStale = true;
+            }
+        }
+        if (!s_npTransitionKnown) {
+            log("NPTransition: init mode=%s phase=%s activity=%s end=%s menu=%d/%u charsel=%d match=%d sid=%u set=%u",
+                netplay_mode_name(np.sessionMode),
+                netplay_phase_name(np.sessionPhase),
+                netplay_activity_name(np.activityPhase),
+                netplay_end_reason_name(np.endReason),
+                np.inNetplayMenu ? 1 : 0,
+                (unsigned)np.netplayMenuScreen,
+                np.inNetplayCharacterSelect ? 1 : 0,
+                np.inNetplayMatch ? 1 : 0,
+                (unsigned)np.sessionId,
+                (unsigned)np.setId);
+            s_npTransitionKnown = true;
+        } else {
+            bool changed =
+                np.sessionMode != s_npLastMode ||
+                np.sessionPhase != s_npLastPhase ||
+                np.activityPhase != s_npLastActivity ||
+                np.endReason != s_npLastEndReason ||
+                np.inNetplayMenu != s_npLastMenu ||
+                np.netplayMenuScreen != s_npLastMenuScreen ||
+                np.inNetplayCharacterSelect != s_npLastCharSelect ||
+                np.inNetplayMatch != s_npLastMatch ||
+                np.sessionId != s_npLastSessionId ||
+                np.setId != s_npLastSetId;
+            if (changed) {
+                log("NPTransition: mode %s -> %s | phase %s -> %s | activity %s -> %s | end %s -> %s | menu %d/%u -> %d/%u | charsel %d -> %d | match %d -> %d | sid %u -> %u | set %u -> %u",
+                    netplay_mode_name(s_npLastMode), netplay_mode_name(np.sessionMode),
+                    netplay_phase_name(s_npLastPhase), netplay_phase_name(np.sessionPhase),
+                    netplay_activity_name(s_npLastActivity), netplay_activity_name(np.activityPhase),
+                    netplay_end_reason_name(s_npLastEndReason), netplay_end_reason_name(np.endReason),
+                    s_npLastMenu ? 1 : 0, (unsigned)s_npLastMenuScreen,
+                    np.inNetplayMenu ? 1 : 0, (unsigned)np.netplayMenuScreen,
+                    s_npLastCharSelect ? 1 : 0, np.inNetplayCharacterSelect ? 1 : 0,
+                    s_npLastMatch ? 1 : 0, np.inNetplayMatch ? 1 : 0,
+                    (unsigned)s_npLastSessionId, (unsigned)np.sessionId,
+                    (unsigned)s_npLastSetId, (unsigned)np.setId);
+            }
+        }
+        s_npLastMode = np.sessionMode;
+        s_npLastPhase = np.sessionPhase;
+        s_npLastActivity = np.activityPhase;
+        s_npLastEndReason = np.endReason;
+        s_npLastMenu = np.inNetplayMenu;
+        s_npLastMenuScreen = np.netplayMenuScreen;
+        s_npLastCharSelect = np.inNetplayCharacterSelect;
+        s_npLastMatch = np.inNetplayMatch;
+        s_npLastSessionId = np.sessionId;
+        s_npLastSetId = np.setId;
+    } else if (s_npTransitionKnown) {
+        log("NPTransition: export lost; clearing transition baseline");
+        s_npTransitionKnown = false;
+        s_npSeqKnown = false;
+        s_npSeqWasStale = false;
+    }
+    if (haveNetplayExport && np.sessionMode != EFZ_SESSION_NONE) {
+        if (np.sessionId != 0 && np.sessionId != s_exportNickSessionId) {
+            s_exportNickSessionId = np.sessionId;
+            s_exportP1NickCache.clear();
+            s_exportP2NickCache.clear();
+        }
+        if (!np.p1Name.empty()) s_exportP1NickCache = np.p1Name;
+        if (!np.p2Name.empty()) s_exportP2NickCache = np.p2Name;
+    } else {
+        s_exportNickSessionId = 0;
+        s_exportP1NickCache.clear();
+        s_exportP2NickCache.clear();
+    }
+
+    bool exportIdleNoFlow =
+        haveNetplayExport &&
+        np.sessionMode != EFZ_SESSION_NONE &&
+        np.sessionPhase == EFZ_PHASE_IDLE &&
+        !np.inNetplayMenu &&
+        !np.inNetplayCharacterSelect &&
+        !np.inNetplayMatch &&
+        (!np.hasActivityPhase || np.activityPhase == EFZ_ACTIVITY_IDLE);
+
+    // Prefer netplay export role when available; it distinguishes hosting/joining.
+    if (haveNetplayExport) {
+        if (exportIdleNoFlow) {
+            // Session metadata can linger as HOST/JOIN after menu/session exit.
+            // Treat idle/no-flow as inactive to avoid sticky "Hosting" presence.
+            onl = OnlineState::Offline;
+        } else {
+            switch (np.sessionMode) {
+                case EFZ_SESSION_HOSTING:
+                case EFZ_SESSION_JOINING:
+                    onl = OnlineState::Netplay;
+                    break;
+                case EFZ_SESSION_SPECTATING:
+                    onl = OnlineState::Spectating;
+                    break;
+                case EFZ_SESSION_TOURNAMENT:
+                    onl = OnlineState::Tournament;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
     // Optional probe: EFZDA_MENU_PROBE=1 dumps a window of the game state struct for reverse engineering
     static bool s_probeChecked = false;
     static bool s_probeEnabled = false;
@@ -870,7 +1414,31 @@ GameState GameStateProvider::get() {
         if (uintptr_t gsp = get_game_state_ptr(efzBase)) probe_game_state_region(gsp);
     }
     const char* onlName = online_state_name(onl);
-    log("GSPoll#%lu: gameModeRaw=%u gameMode='%s' onlineState='%s'", s_poll, (unsigned)gmRaw, gmName ? gmName : "?", onlName ? onlName : "?");
+    if (haveNetplayExport) {
+        log("GSPoll#%lu: gameModeRaw=%u gameMode='%s' onlineState='%s' netplay(mode=%d phase=%d side=%d menu=%d/%u cs=%d match=%d act=%u:%s end=%u:%s caps=0x%X seq=%u sid=%u set=%u)",
+            s_poll,
+            (unsigned)gmRaw,
+            gmName ? gmName : "?",
+            onlName ? onlName : "?",
+            np.sessionMode,
+            np.sessionPhase,
+            np.localSide,
+            np.inNetplayMenu ? 1 : 0,
+            (unsigned)np.netplayMenuScreen,
+            np.inNetplayCharacterSelect ? 1 : 0,
+            np.inNetplayMatch ? 1 : 0,
+            (unsigned)np.activityPhase,
+            netplay_activity_name(np.activityPhase),
+            (unsigned)np.endReason,
+            netplay_end_reason_name(np.endReason),
+            (unsigned)np.capabilityFlags,
+            (unsigned)np.stateSeq,
+            (unsigned)np.sessionId,
+            (unsigned)np.setId);
+    } else {
+        log("GSPoll#%lu: gameModeRaw=%u gameMode='%s' onlineState='%s'",
+            s_poll, (unsigned)gmRaw, gmName ? gmName : "?", onlName ? onlName : "?");
+    }
     // If the EFZ game mode changed (offline/unknown), treat it as a transition from main menu to a pre-match flow (char-select)
     bool justChangedMode = false;
     if ((onl == OnlineState::Offline || onl == OnlineState::Unknown) && s_lastGmRaw != gmRaw) {
@@ -884,6 +1452,404 @@ GameState GameStateProvider::get() {
     }
 
     bool inMatch = !p1.empty() && !p2.empty();
+
+    bool isOnTitleScreen = false;
+    if (haveTopScreen && s_screenTitle >= 0) {
+        isOnTitleScreen = (topScreenIdx == (uint8_t)s_screenTitle);
+    }
+    bool inNetplayMenuState = haveNetplayExport && np.inNetplayMenu;
+    bool inNetplayConnectingState = false;
+    bool inNetplayDelaySetupState = false;
+    bool inNetplayCharacterSelectState = haveNetplayExport && np.inNetplayCharacterSelect;
+    bool inNetplayLoadingState = false;
+    bool inNetplayMatchState = haveNetplayExport && np.inNetplayMatch;
+    bool inNetplayResultsState = false;
+    bool useActivityPhase =
+        haveNetplayExport &&
+        np.hasActivityPhase &&
+        (!np.hasCapabilityFlags ||
+         (np.capabilityFlags & EFZ_CAP_ACTIVITY) != 0 ||
+         np.activityPhase != EFZ_ACTIVITY_IDLE);
+    if (useActivityPhase) {
+        inNetplayMenuState = false;
+        inNetplayConnectingState = false;
+        inNetplayDelaySetupState = false;
+        inNetplayCharacterSelectState = false;
+        inNetplayLoadingState = false;
+        inNetplayMatchState = false;
+        inNetplayResultsState = false;
+        switch (np.activityPhase) {
+            case EFZ_ACTIVITY_MENU: inNetplayMenuState = true; break;
+            case EFZ_ACTIVITY_CONNECTING: inNetplayConnectingState = true; break;
+            case EFZ_ACTIVITY_DELAY_SETUP: inNetplayDelaySetupState = true; break;
+            case EFZ_ACTIVITY_CHAR_SELECT: inNetplayCharacterSelectState = true; break;
+            case EFZ_ACTIVITY_LOADING: inNetplayLoadingState = true; break;
+            case EFZ_ACTIVITY_MATCH: inNetplayMatchState = true; break;
+            case EFZ_ACTIVITY_RESULTS: inNetplayResultsState = true; break;
+            default: break;
+        }
+    }
+    if (inNetplayMenuState &&
+        (inNetplayCharacterSelectState || inNetplayLoadingState || inNetplayMatchState || inNetplayResultsState)) {
+        log("GSPoll#%lu: suppress netplay-menu state (explicit netplay activity flags)", s_poll);
+        inNetplayMenuState = false;
+    }
+    bool hasActiveNetplaySession = haveNetplayExport && np.sessionMode != EFZ_SESSION_NONE;
+    bool localScreenContradictsMenu =
+        haveTopScreen &&
+        s_screenTitle >= 0 &&
+        topScreenIdx != (uint8_t)s_screenTitle;
+    bool localVsFlow = (gmRaw == 4 || gmRaw == 5);
+    auto mapLocalFlowFromContext = [&]() {
+        bool mapped = false;
+        if (haveTopScreen) {
+            if (s_screenCharSel >= 0 && topScreenIdx == (uint8_t)s_screenCharSel) {
+                inNetplayCharacterSelectState = true;
+                mapped = true;
+            } else if (s_screenLoading >= 0 && topScreenIdx == (uint8_t)s_screenLoading) {
+                inNetplayLoadingState = true;
+                mapped = true;
+            } else if (s_screenInGame >= 0 && topScreenIdx == (uint8_t)s_screenInGame) {
+                inNetplayMatchState = true;
+                mapped = true;
+            }
+        }
+        if (!mapped && (inMatch || spawnedDebounced)) {
+            inNetplayMatchState = true;
+            mapped = true;
+        }
+        if (!mapped && hasActiveNetplaySession && localVsFlow) {
+            inNetplayCharacterSelectState = true;
+            mapped = true;
+        }
+        return mapped;
+    };
+    // Hard override for known bad exports: session is active and local flow is
+    // clearly not title/menu even though activity/menu flags still say "Menu".
+    if (inNetplayMenuState &&
+        hasActiveNetplaySession &&
+        (localScreenContradictsMenu || (np.sessionPhase == EFZ_PHASE_CONNECTED && localVsFlow))) {
+        log("GSPoll#%lu: suppress netplay-menu state (hard override: session=%d phase=%d screen=%u title=%d gmRaw=%u)",
+            s_poll,
+            np.sessionMode,
+            np.sessionPhase,
+            haveTopScreen ? (unsigned)topScreenIdx : 0xFFu,
+            s_screenTitle,
+            (unsigned)gmRaw);
+        inNetplayMenuState = false;
+        if (!mapLocalFlowFromContext() && np.sessionPhase == EFZ_PHASE_CONNECTED) {
+            inNetplayLoadingState = true;
+        }
+    }
+    // The menu overlay should only exist on title screen. If local game state clearly
+    // indicates gameplay/charselect, treat menu/activity=Menu as stale and prefer local evidence.
+    bool gameplayLikeContext =
+        inMatch ||
+        spawnedDebounced ||
+        (haveTopScreen && !isOnTitleScreen);
+    if (inNetplayMenuState &&
+        gameplayLikeContext &&
+        (np.sessionPhase == EFZ_PHASE_CONNECTED || npStateLikelyStale)) {
+        log("GSPoll#%lu: suppress netplay-menu state (local context contradicts menu, screen=%u title=%d connected=%d stale=%d)",
+            s_poll,
+            haveTopScreen ? (unsigned)topScreenIdx : 0xFFu,
+            s_screenTitle,
+            (np.sessionPhase == EFZ_PHASE_CONNECTED) ? 1 : 0,
+            npStateLikelyStale ? 1 : 0);
+        inNetplayMenuState = false;
+        if (!mapLocalFlowFromContext() && np.sessionPhase == EFZ_PHASE_CONNECTED) {
+            inNetplayLoadingState = true;
+        }
+    }
+    if (!useActivityPhase) {
+        // The menu overlay lives on top of title screen. If we're no longer on title,
+        // or match entities are already spawned during connected phase, treat menu flag
+        // as stale and continue into normal online/match presence handling.
+        if (inNetplayMenuState && haveTopScreen && !isOnTitleScreen) {
+            log("GSPoll#%lu: suppress netplay-menu state (screen=%u not title=%d)",
+                s_poll, (unsigned)topScreenIdx, s_screenTitle);
+            inNetplayMenuState = false;
+        }
+        if (inNetplayMenuState && np.sessionPhase == EFZ_PHASE_CONNECTED) {
+            // Connected alone is not enough: after a match, the session may remain
+            // connected while the user is back in the netplay menu.
+            // Suppress menu only when context still looks like active gameplay/handoff.
+            if (gameplayLikeContext) {
+                log("GSPoll#%lu: suppress netplay-menu state (connected gameplay context)", s_poll);
+                inNetplayMenuState = false;
+            }
+        }
+    }
+
+    if (exportIdleNoFlow) {
+        // Session metadata can linger as Hosting/Joining after leaving the netplay flow.
+        // Force local netplay-flow flags inactive so we fall back to normal menu/offline mapping.
+        inNetplayMenuState = false;
+        inNetplayConnectingState = false;
+        inNetplayDelaySetupState = false;
+        inNetplayCharacterSelectState = false;
+        inNetplayLoadingState = false;
+        inNetplayMatchState = false;
+        inNetplayResultsState = false;
+    }
+
+    bool exportSnapshotResolved = false;
+    int exportSelfIdx = -1;
+    int exportP1Wins = 0;
+    int exportP2Wins = 0;
+    std::string exportP1Nick;
+    std::string exportP2Nick;
+    auto ensureExportSnapshot = [&]() {
+        if (exportSnapshotResolved) return;
+        exportSnapshotResolved = true;
+        if (!haveNetplayExport || np.sessionMode == EFZ_SESSION_NONE) return;
+
+        auto clampScore = [](int v) { return (v >= 0 && v <= 99) ? v : 0; };
+
+        exportSelfIdx = np.localSide;
+        if (exportSelfIdx != 0 && exportSelfIdx != 1) {
+            if (np.sessionMode == EFZ_SESSION_HOSTING) exportSelfIdx = 0;
+            else if (np.sessionMode == EFZ_SESSION_JOINING) exportSelfIdx = 1;
+        }
+
+        exportP1Wins = np.p1Wins;
+        exportP2Wins = np.p2Wins;
+        exportP1Nick = !np.p1Name.empty() ? np.p1Name : s_exportP1NickCache;
+        exportP2Nick = !np.p2Name.empty() ? np.p2Name : s_exportP2NickCache;
+
+        if (exportSelfIdx == 0 && exportP1Nick.empty() && !np.localNickname.empty()) exportP1Nick = np.localNickname;
+        if (exportSelfIdx == 1 && exportP2Nick.empty() && !np.localNickname.empty()) exportP2Nick = np.localNickname;
+        if (exportSelfIdx == -1 && exportP1Nick.empty() && !np.localNickname.empty() && np.sessionMode == EFZ_SESSION_HOSTING) exportP1Nick = np.localNickname;
+        if (exportSelfIdx == -1 && exportP2Nick.empty() && !np.localNickname.empty() && np.sessionMode == EFZ_SESSION_JOINING) exportP2Nick = np.localNickname;
+
+        if (!revivalBase) {
+            exportP1Wins = clampScore(exportP1Wins);
+            exportP2Wins = clampScore(exportP2Wins);
+            return;
+        }
+
+        int revivalSelfIdx = read_current_player_index(revivalBase);
+        if ((exportSelfIdx != 0 && exportSelfIdx != 1) && (revivalSelfIdx == 0 || revivalSelfIdx == 1)) {
+            exportSelfIdx = revivalSelfIdx;
+        }
+
+        if (exportP1Nick.empty()) {
+            exportP1Nick = read_nickname(revivalBase, NickP1Offset(), P1_NICKNAME_SPECTATOR_OFFSET);
+        }
+        if (exportP2Nick.empty()) {
+            exportP2Nick = read_nickname(revivalBase, NickP2Offset(), P2_NICKNAME_SPECTATOR_OFFSET);
+        }
+
+        bool inActiveFlowContext =
+            inNetplayCharacterSelectState ||
+            inNetplayLoadingState ||
+            inNetplayMatchState ||
+            inNetplayResultsState ||
+            np.sessionPhase == EFZ_PHASE_CONNECTED;
+
+        bool needWinsFallback =
+            (exportP1Wins < 0 || exportP1Wins > 99 || exportP2Wins < 0 || exportP2Wins > 99) ||
+            ((exportP1Wins == 0 && exportP2Wins == 0) && inActiveFlowContext);
+        if (needWinsFallback) {
+            int revP1Wins = 0;
+            int revP2Wins = 0;
+            if (np.sessionMode == EFZ_SESSION_TOURNAMENT || onl == OnlineState::Tournament) {
+                revP1Wins = read_win_count(revivalBase, TournP1WinOffset(), P1_WIN_COUNT_SPECTATOR_OFFSET);
+                revP2Wins = read_win_count(revivalBase, TournP2WinOffset(), P2_WIN_COUNT_SPECTATOR_OFFSET);
+            } else {
+                revP1Wins = read_win_count(revivalBase, NetP1WinOffset(), P1_WIN_COUNT_SPECTATOR_OFFSET);
+                revP2Wins = read_win_count(revivalBase, NetP2WinOffset(), P2_WIN_COUNT_SPECTATOR_OFFSET);
+            }
+            if ((exportP1Wins < 0 || exportP1Wins > 99 || exportP2Wins < 0 || exportP2Wins > 99) ||
+                ((exportP1Wins == 0 && exportP2Wins == 0) && (revP1Wins > 0 || revP2Wins > 0))) {
+                exportP1Wins = revP1Wins;
+                exportP2Wins = revP2Wins;
+            }
+        }
+
+        exportP1Wins = clampScore(exportP1Wins);
+        exportP2Wins = clampScore(exportP2Wins);
+    };
+
+    // Dedicated netplay-menu state from efz_netplay_mod export.
+    if (inNetplayMenuState) {
+        gs.details = "In Netplay Menu";
+        std::string state = netplay_menu_screen_name(np.netplayMenuScreen);
+        if (np.sessionPhase != EFZ_PHASE_IDLE &&
+            np.sessionPhase != EFZ_PHASE_CONNECTED) {
+            state += " (" + std::string(netplay_phase_name(np.sessionPhase)) + ")";
+        }
+        gs.state = state;
+        gs.largeImageKey = "efz_icon";
+        gs.largeImageText = "Netplay Menu";
+        gs.smallImageKey.clear();
+        gs.smallImageText.clear();
+        s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw;
+        log("GSPoll#%lu: netplay-menu -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
+        return gs;
+    }
+
+    // Connecting/negotiation/error phases should be explicit statuses.
+    bool phaseNeedsStatus =
+        np.sessionPhase == EFZ_PHASE_CONNECTING ||
+        np.sessionPhase == EFZ_PHASE_DELAY_SETUP ||
+        np.sessionPhase == EFZ_PHASE_FAILED ||
+        np.sessionPhase == EFZ_PHASE_SESSION_ENDED;
+    if (haveNetplayExport &&
+        np.sessionMode != EFZ_SESSION_NONE &&
+        !exportIdleNoFlow &&
+        np.sessionPhase != EFZ_PHASE_IDLE &&
+        (phaseNeedsStatus || inNetplayConnectingState || inNetplayDelaySetupState)) {
+        ensureExportSnapshot();
+        int mode = np.sessionMode;
+        if (mode == EFZ_SESSION_HOSTING) gs.details = np.localNickname.empty() ? "Hosting" : ("Hosting(" + np.localNickname + ")");
+        else if (mode == EFZ_SESSION_JOINING) gs.details = "Playing online match";
+        else if (mode == EFZ_SESSION_SPECTATING) gs.details = "Watching online match";
+        else if (mode == EFZ_SESSION_TOURNAMENT) gs.details = "Playing tournament match";
+        else gs.details = "Online";
+
+        if (inNetplayConnectingState) {
+            gs.state = "Connecting...";
+        } else if (inNetplayDelaySetupState) {
+            gs.state = "Setting input delay...";
+        } else {
+            switch (np.sessionPhase) {
+                case EFZ_PHASE_CONNECTING: gs.state = "Connecting..."; break;
+                case EFZ_PHASE_DELAY_SETUP: gs.state = "Setting input delay..."; break;
+                case EFZ_PHASE_FAILED: gs.state = "Connection failed"; break;
+                case EFZ_PHASE_SESSION_ENDED: gs.state = "Session ended"; break;
+                default: gs.state = "Synchronizing..."; break;
+            }
+        }
+        if (np.hasEndReason &&
+            np.endReason != EFZ_END_NONE &&
+            (np.sessionPhase == EFZ_PHASE_FAILED || np.sessionPhase == EFZ_PHASE_SESSION_ENDED)) {
+            gs.state += " (" + std::string(netplay_end_reason_name(np.endReason)) + ")";
+        }
+        if (exportP1Wins >= 0 && exportP2Wins >= 0 && exportP1Wins <= 99 && exportP2Wins <= 99) {
+            gs.state += " (" + std::to_string(exportP1Wins) + "-" + std::to_string(exportP2Wins) + ")";
+        }
+        gs.largeImageKey = "210px-efzlogo";
+        gs.largeImageText = "Online Match";
+        gs.smallImageKey.clear();
+        gs.smallImageText.clear();
+        s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw;
+        log("GSPoll#%lu: netplay-phase -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
+        return gs;
+    }
+
+    // Explicit online character-select state from netplay export (v3/v4).
+    if (inNetplayCharacterSelectState) {
+        ensureExportSnapshot();
+        int side = exportSelfIdx;
+        if (side != 0 && side != 1) {
+            if (np.sessionMode == EFZ_SESSION_HOSTING) side = 0;
+            else if (np.sessionMode == EFZ_SESSION_JOINING) side = 1;
+        }
+        std::string p1Nick = exportP1Nick;
+        std::string p2Nick = exportP2Nick;
+        if (side == 0 && p1Nick.empty() && !np.localNickname.empty()) p1Nick = np.localNickname;
+        if (side == 1 && p2Nick.empty() && !np.localNickname.empty()) p2Nick = np.localNickname;
+        const std::string selfNick = (side == 0 ? p1Nick : (side == 1 ? p2Nick : std::string()));
+        const std::string oppNick = (side == 0 ? p2Nick : (side == 1 ? p1Nick : std::string()));
+        const std::string& ourChar = (side == 1 ? p2 : p1);
+        const std::string& oppChar = (side == 1 ? p1 : p2);
+
+        if (onl == OnlineState::Tournament) {
+            gs.details = "Playing tournament match";
+        } else if (onl == OnlineState::Spectating) {
+            gs.details = "Watching online match";
+        } else {
+            gs.details = selfNick.empty() ? "Playing online match" : ("Playing online match (" + selfNick + ")");
+        }
+        int ourWins = (side == 1 ? exportP2Wins : exportP1Wins);
+        int theirWins = (side == 1 ? exportP1Wins : exportP2Wins);
+        bool haveScore = (ourWins >= 0 && theirWins >= 0 && ourWins <= 99 && theirWins <= 99);
+        if (!oppChar.empty() || !oppNick.empty()) {
+            gs.state = "Against ";
+            if (!oppChar.empty()) {
+                gs.state += oppChar;
+                if (!oppNick.empty()) gs.state += " (" + oppNick + ")";
+            } else {
+                gs.state += oppNick;
+            }
+        } else {
+            gs.state = "Character select";
+        }
+        if (haveScore) {
+            gs.state += " (" + std::to_string(ourWins) + "-" + std::to_string(theirWins) + ")";
+        }
+
+        if (!ourChar.empty()) {
+            std::string kL = map_char_to_large_image_key(ourChar);
+            if (!kL.empty()) { gs.largeImageKey = kL; gs.largeImageText = ourChar; }
+            else { gs.largeImageKey = "210px-efzlogo"; gs.largeImageText = "Online Match"; }
+        } else {
+            gs.largeImageKey = "210px-efzlogo";
+            gs.largeImageText = "Online Match";
+        }
+        if (!oppChar.empty()) {
+            std::string kS = map_char_to_small_icon_key(oppChar);
+            if (!kS.empty()) { gs.smallImageKey = kS; gs.smallImageText = std::string("Against ") + oppChar; }
+            else { gs.smallImageKey.clear(); gs.smallImageText.clear(); }
+        } else {
+            gs.smallImageKey.clear();
+            gs.smallImageText.clear();
+        }
+        s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw;
+        log("GSPoll#%lu: netplay-charselect -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
+        return gs;
+    }
+
+    if (inNetplayLoadingState) {
+        ensureExportSnapshot();
+        std::string selfNick = (exportSelfIdx == 0 ? exportP1Nick : (exportSelfIdx == 1 ? exportP2Nick : std::string()));
+        if (onl == OnlineState::Tournament) gs.details = "Playing tournament match";
+        else if (onl == OnlineState::Spectating) gs.details = "Watching online match";
+        else gs.details = selfNick.empty() ? "Playing online match" : ("Playing online match (" + selfNick + ")");
+        gs.state = "Loading match";
+        if (exportP1Wins >= 0 && exportP2Wins >= 0 && exportP1Wins <= 99 && exportP2Wins <= 99) {
+            int left = exportP1Wins;
+            int right = exportP2Wins;
+            if (onl != OnlineState::Spectating && exportSelfIdx == 1) {
+                left = exportP2Wins;
+                right = exportP1Wins;
+            }
+            gs.state += " (" + std::to_string(left) + "-" + std::to_string(right) + ")";
+        }
+        gs.largeImageKey = "210px-efzlogo";
+        gs.largeImageText = "Online Match";
+        gs.smallImageKey.clear();
+        gs.smallImageText.clear();
+        s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw;
+        log("GSPoll#%lu: netplay-loading -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
+        return gs;
+    }
+
+    if (inNetplayResultsState) {
+        ensureExportSnapshot();
+        std::string selfNick = (exportSelfIdx == 0 ? exportP1Nick : (exportSelfIdx == 1 ? exportP2Nick : std::string()));
+        if (onl == OnlineState::Tournament) gs.details = "Playing tournament match";
+        else if (onl == OnlineState::Spectating) gs.details = "Watching online match";
+        else gs.details = selfNick.empty() ? "Playing online match" : ("Playing online match (" + selfNick + ")");
+        gs.state = "Results";
+        if (exportP1Wins >= 0 && exportP2Wins >= 0 && exportP1Wins <= 99 && exportP2Wins <= 99) {
+            int left = exportP1Wins;
+            int right = exportP2Wins;
+            if (onl != OnlineState::Spectating && exportSelfIdx == 1) {
+                left = exportP2Wins;
+                right = exportP1Wins;
+            }
+            gs.state += " (" + std::to_string(left) + "-" + std::to_string(right) + ")";
+        }
+        gs.largeImageKey = "210px-efzlogo";
+        gs.largeImageText = "Online Match";
+        gs.smallImageKey.clear();
+        gs.smallImageText.clear();
+        s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw;
+        log("GSPoll#%lu: netplay-results -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
+        return gs;
+    }
 
     // No offline suppression: we will show available characters incrementally like netplay
 
@@ -1061,7 +2027,16 @@ GameState GameStateProvider::get() {
     int p1Wins = 0, p2Wins = 0;
     std::string p1Nick, p2Nick;
     int selfIdx = -1; // 0=P1, 1=P2, -1 unknown
-    if (onl == OnlineState::Netplay || onl == OnlineState::Spectating || onl == OnlineState::Tournament) {
+    if (haveNetplayExport && np.sessionMode != EFZ_SESSION_NONE) {
+        ensureExportSnapshot();
+        p1Wins = exportP1Wins;
+        p2Wins = exportP2Wins;
+        p1Nick = exportP1Nick;
+        p2Nick = exportP2Nick;
+        selfIdx = exportSelfIdx;
+        log("GSPoll#%lu: using netplay export for scores/nicknames (mode=%d phase=%d side=%d p1=%d p2=%d)",
+            s_poll, np.sessionMode, np.sessionPhase, selfIdx, p1Wins, p2Wins);
+    } else if (onl == OnlineState::Netplay || onl == OnlineState::Spectating || onl == OnlineState::Tournament) {
         if (onl == OnlineState::Tournament) {
             // 1.02i appears to store tournament counters differently; prefer plausible pair between standard and tournament.
             EfzRevivalVersion ver = DetectEfzRevivalVersion();
@@ -1130,10 +2105,19 @@ GameState GameStateProvider::get() {
     // Online nickname monitoring: if reported online but both nicknames are missing, keep monitoring
     if (onl == OnlineState::Netplay || onl == OnlineState::Spectating || onl == OnlineState::Tournament) {
         bool haveAnyNick = !p1Nick.empty() || !p2Nick.empty();
-        if (!haveAnyNick) {
-            s_waitOnlineNicknames = true;
+        if (haveNetplayExport) {
+            if (inNetplayMatchState) {
+                // During active match, avoid falling back to generic menu text
+                // just because nicknames have not populated yet.
+                s_waitOnlineNicknames = false;
+            } else {
+            // When export is present, only wait on nicknames once a session is actually connected.
+            s_waitOnlineNicknames =
+                !haveAnyNick &&
+                np.sessionPhase == EFZ_PHASE_CONNECTED;
+            }
         } else {
-            s_waitOnlineNicknames = false;
+            s_waitOnlineNicknames = !haveAnyNick;
         }
     } else {
         s_waitOnlineNicknames = false;
@@ -1142,6 +2126,9 @@ GameState GameStateProvider::get() {
     // ONLINE formatting (ignore gmName which often reads VS Human)
     std::string selfNick = (selfIdx == 0 ? p1Nick : selfIdx == 1 ? p2Nick : std::string());
     std::string oppNick = (selfIdx == 0 ? p2Nick : selfIdx == 1 ? p1Nick : std::string());
+    if (selfNick.empty() && haveNetplayExport && !np.localNickname.empty()) {
+        selfNick = np.localNickname;
+    }
 
     // details: Playing/Watching online match (selfNick if known)
     if (s_waitOnlineNicknames) {
@@ -1209,7 +2196,22 @@ GameState GameStateProvider::get() {
     } else if (onl == OnlineState::Tournament) {
         gs.details = std::string("Playing tournament match") + (selfNick.empty() ? "" : (" (" + selfNick + ")"));
     } else {
-        gs.details = std::string("Playing online match") + (selfNick.empty() ? "" : (" (" + selfNick + ")"));
+        bool liveOnlineBattleContext =
+            inNetplayMatchState ||
+            inMatch ||
+            spawnedDebounced ||
+            (haveTopScreen && s_screenInGame >= 0 && topScreenIdx == (uint8_t)s_screenInGame);
+        bool hostPreMatchContext =
+            haveNetplayExport &&
+            np.sessionMode == EFZ_SESSION_HOSTING &&
+            !liveOnlineBattleContext &&
+            !inNetplayLoadingState;
+        if (hostPreMatchContext) {
+            gs.details = selfNick.empty() ? "Hosting" : ("Hosting(" + selfNick + ")");
+        } else {
+            // Match/live context should mirror vanilla wording for both host and join.
+            gs.details = std::string("Playing online match") + (selfNick.empty() ? "" : (" (" + selfNick + ")"));
+        }
     }
 
     // state: Prefer opponent character; if missing but nickname exists, use "Against the <nickname>"; otherwise show waiting message
