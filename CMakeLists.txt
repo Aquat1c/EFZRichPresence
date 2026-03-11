@@ -82,8 +82,8 @@ if (EFZ_ENABLE_CONSOLE)
     target_compile_definitions(EfzRichPresence PRIVATE EFZ_ENABLE_CONSOLE)
 endif()
 
-# File/debug logger switch
-option(EFZDA_ENABLE_LOGGING "Enable EfzRichPresence logging" ON)
+# File/debug logger switch (disabled by default)
+option(EFZDA_ENABLE_LOGGING "Enable EfzRichPresence logging" OFF)
 if (EFZDA_ENABLE_LOGGING)
     target_compile_definitions(EfzRichPresence PRIVATE EFZDA_ENABLE_LOGGING=1)
 else()

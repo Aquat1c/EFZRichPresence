@@ -35,7 +35,7 @@ extern "C" {
 // Validation magic: 'EFZN' in little-endian byte order.
 #define EFZ_NETPLAY_STATE_MAGIC       0x4E5A4645u
 // Current struct layout version.  Increment when fields are added/changed.
-#define EFZ_NETPLAY_STATE_VERSION     4u
+#define EFZ_NETPLAY_STATE_VERSION     6u
 // Well-known name for the named shared memory block.
 #define EFZ_NETPLAY_STATE_SHM_NAME    "EFZNetplay_State"
 
@@ -50,7 +50,7 @@ extern "C" {
 #define EFZ_CAP_SCORES        (1u << 1)  // p1Wins, p2Wins, matchCounter
 #define EFZ_CAP_NICKNAMES     (1u << 2)  // localNickname, p1Name, p2Name
 #define EFZ_CAP_NETWORK       (1u << 3)  // pingMs, rollbackFrames
-#define EFZ_CAP_MENU          (1u << 4)  // inNetplayMenu, netplayMenuScreen
+#define EFZ_CAP_MENU          (1u << 4)  // inNetplayMenu, netplayMenuScreen, netplayMenuDetail
 #define EFZ_CAP_REVIVAL       (1u << 5)  // revivalVersion
 #define EFZ_CAP_GAME_FLOW     (1u << 6)  // inNetplayCharacterSelect, inNetplayMatch
 #define EFZ_CAP_ACTIVITY      (1u << 7)  // activityPhase, endReason
@@ -122,11 +122,43 @@ enum EFZNetplayEndReason
 // ---------------------------------------------------------------------------
 enum EFZNetplayMenuScreen
 {
-    EFZ_MENU_MAIN     = 0,  // Top-level: Host / Join / Nickname / Lobby / Back
-    EFZ_MENU_HOST     = 1,  // Host settings sub-menu
-    EFZ_MENU_JOIN     = 2,  // Join settings sub-menu
-    EFZ_MENU_NICKNAME = 3,  // Nickname edit sub-menu
-    EFZ_MENU_LOBBY    = 4,  // Lobby browser
+    EFZ_MENU_MAIN         = 0,  // Top-level: Host / Join / Player Rooms / Lobby / Battle Log / Options / Back
+    EFZ_MENU_HOST         = 1,  // Host settings sub-menu
+    EFZ_MENU_JOIN         = 2,  // Join settings sub-menu
+    EFZ_MENU_PLAYER_ROOMS = 3,  // Player Rooms browser
+    EFZ_MENU_OPTIONS      = 4,  // Options menu
+    EFZ_MENU_NICKNAME     = EFZ_MENU_OPTIONS, // Legacy alias retained for source compatibility
+    EFZ_MENU_LOBBY        = 5,  // Active lobby / room browser
+    EFZ_MENU_BATTLE_LOG   = 6,  // Battle Log
+};
+
+// ---------------------------------------------------------------------------
+// Netplay menu detail — menu-specific subview / mode.
+// Only meaningful when inNetplayMenu is non-zero.
+// The value depends on netplayMenuScreen.
+// ---------------------------------------------------------------------------
+enum EFZNetplayMenuDetail
+{
+    EFZ_MENU_DETAIL_NONE = 0,
+
+    // Player Rooms
+    EFZ_MENU_DETAIL_PLAYER_ROOMS_ROOT   = 1,
+    EFZ_MENU_DETAIL_PLAYER_ROOMS_JOIN   = 2,
+    EFZ_MENU_DETAIL_PLAYER_ROOMS_CREATE = 3,
+
+    // Options
+    EFZ_MENU_DETAIL_OPTIONS_ROOT     = 16,
+    EFZ_MENU_DETAIL_OPTIONS_CATEGORY = 17,
+    EFZ_MENU_DETAIL_OPTIONS_EDIT     = 18,
+    EFZ_MENU_DETAIL_OPTIONS_MODAL    = 19,
+
+    // Battle Log
+    EFZ_MENU_DETAIL_BATTLE_LOG_SUMMARY_PROFILE = 32,
+    EFZ_MENU_DETAIL_BATTLE_LOG_SUMMARY_FULL    = 33,
+    EFZ_MENU_DETAIL_BATTLE_LOG_SUMMARY_SEARCH  = 34,
+    EFZ_MENU_DETAIL_BATTLE_LOG_BROWSER         = 35,
+    EFZ_MENU_DETAIL_BATTLE_LOG_FILTERS         = 36,
+    EFZ_MENU_DETAIL_BATTLE_LOG_SET_DETAILS     = 37,
 };
 
 // ---------------------------------------------------------------------------
@@ -156,7 +188,7 @@ struct EFZNetplayState
     int32_t  matchCounter;       // Current match index within the set
 
     // --- Nicknames ---------------------------------------------------------
-    char     localNickname[32];  // Our chosen nickname (from EfzRevival.ini)
+    char     localNickname[64];  // Our chosen nickname (UTF-8, from EfzRevival.ini)
     char     p1Name[64];         // P1 nickname (from Revival session object)
     char     p2Name[64];         // P2 nickname (from Revival session object)
 
@@ -168,7 +200,10 @@ struct EFZNetplayState
     uint8_t  inNetplayMenu;      // Non-zero when the netplay menu overlay is open
     uint8_t  netplayMenuScreen;  // EFZNetplayMenuScreen enum (only valid when
                                  // inNetplayMenu is non-zero)
-    uint8_t  _pad0[2];           // Alignment padding — reserved, must be 0
+    uint8_t  netplayMenuDetail;  // EFZNetplayMenuDetail enum (menu-specific
+                                 // subview / mode; only valid when
+                                 // inNetplayMenu is non-zero)
+    uint8_t  _pad0;              // Alignment padding — reserved, must be 0
 
     // --- EfzRevival version (v2) -------------------------------------------
     // Null-terminated version tag (e.g. "1.02e", "1.02i").
