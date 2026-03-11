@@ -87,7 +87,8 @@ If the Discord pipe isn’t available at startup, the DLL will attempt to spawn 
 
 ## Debug logging
 
-- File logs are enabled by default (`EFZDA_ENABLE_LOGGING=ON`) and written to `EfzRichPresence.log` beside the DLL (falls back to `%TEMP%` if unwritable).
+- File logs are disabled by default (`EFZDA_ENABLE_LOGGING=OFF`).
+- Enable file logs explicitly with `-DEFZDA_ENABLE_LOGGING=ON`; they are written to `EfzRichPresence.log` beside the DLL (falls back to `%TEMP%` if unwritable).
 - Enable live console output by setting `EFZDA_ENABLE_CONSOLE=1` before launching EFZ.
 - Netplay transition lines use the `NPTransition:` prefix and show mode/phase/activity/menu/charselect/match/session transitions.
 ## Runtime behavior (details/state)

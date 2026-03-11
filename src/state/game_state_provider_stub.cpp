@@ -808,6 +808,7 @@ struct NetplayExportState {
     int32_t rollbackFrames = -1;
     bool inNetplayMenu = false;
     uint8_t netplayMenuScreen = 0;
+    uint8_t netplayMenuDetail = EFZ_MENU_DETAIL_NONE;
     bool inNetplayCharacterSelect = false;
     bool inNetplayMatch = false;
     uint8_t activityPhase = EFZ_ACTIVITY_IDLE;
@@ -825,6 +826,53 @@ struct NetplayExportState {
     std::string p1Name;
     std::string p2Name;
     std::string revivalVersion;
+};
+
+// v2-v4 layout used before the menu ABI refresh in v6. The v6 public header is
+// now the default, so older export layouts are decoded through this compat
+// struct instead of relying on a single memcpy path.
+struct EFZNetplayStateCompatV4 {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t structSize;
+    uint32_t lastUpdateTick;
+    int32_t sessionMode;
+    int32_t sessionPhase;
+    int32_t localSide;
+    int32_t p1Wins;
+    int32_t p2Wins;
+    int32_t matchCounter;
+    char localNickname[32];
+    char p1Name[64];
+    char p2Name[64];
+    int32_t pingMs;
+    int32_t rollbackFrames;
+    uint8_t inNetplayMenu;
+    uint8_t netplayMenuScreen;
+    uint8_t pad0[2];
+    char revivalVersion[16];
+    uint8_t inNetplayCharacterSelect;
+    uint8_t inNetplayMatch;
+    uint8_t pad1[2];
+    uint32_t capabilityFlags;
+    uint32_t stateSeq;
+    uint32_t sessionId;
+    uint32_t setId;
+    uint8_t activityPhase;
+    uint8_t endReason;
+    uint8_t pad2[2];
+    uint8_t p1CharId;
+    uint8_t p2CharId;
+    uint8_t p1Locked;
+    uint8_t p2Locked;
+    uint8_t localCursorCharId;
+    uint8_t pad3[3];
+    uint8_t stageId;
+    uint8_t roundIndex;
+    uint8_t isRoundActive;
+    uint8_t pad4;
+    uint16_t roundTimerFrames;
+    uint8_t pad5[2];
 };
 
 static HANDLE s_npMapHandle = nullptr;
@@ -894,7 +942,18 @@ static std::string read_cstr_from_struct(const unsigned char* base, uint32_t str
     return sanitize_cstr(reinterpret_cast<const char*>(base + off), n);
 }
 
-static bool parse_netplay_export_state_current(const unsigned char* base, uint32_t structSize, uint32_t version32, NetplayExportState& out) {
+static uint8_t normalize_legacy_menu_screen(uint8_t legacyScreen) {
+    switch (legacyScreen) {
+        case 0: return EFZ_MENU_MAIN;
+        case 1: return EFZ_MENU_HOST;
+        case 2: return EFZ_MENU_JOIN;
+        case 3: return EFZ_MENU_OPTIONS; // old Nickname menu
+        case 4: return EFZ_MENU_LOBBY;
+        default: return legacyScreen;
+    }
+}
+
+static bool parse_netplay_export_state_v6(const unsigned char* base, uint32_t structSize, uint32_t version32, NetplayExportState& out) {
     EFZNetplayState typed{};
     const size_t toCopy = (std::min)(static_cast<size_t>(structSize), sizeof(EFZNetplayState));
     std::memcpy(&typed, base, toCopy);
@@ -914,19 +973,22 @@ static bool parse_netplay_export_state_current(const unsigned char* base, uint32
     out.pingMs = typed.pingMs;
     out.rollbackFrames = typed.rollbackFrames;
 
-    if (structSize > offsetof(EFZNetplayState, inNetplayMenu)) {
+    if (structSize >= offsetof(EFZNetplayState, inNetplayMenu) + sizeof(typed.inNetplayMenu)) {
         out.inNetplayMenu = (typed.inNetplayMenu != 0);
     }
-    if (structSize > offsetof(EFZNetplayState, netplayMenuScreen)) {
+    if (structSize >= offsetof(EFZNetplayState, netplayMenuScreen) + sizeof(typed.netplayMenuScreen)) {
         out.netplayMenuScreen = typed.netplayMenuScreen;
     }
-    if (structSize > offsetof(EFZNetplayState, revivalVersion)) {
+    if (structSize >= offsetof(EFZNetplayState, netplayMenuDetail) + sizeof(typed.netplayMenuDetail)) {
+        out.netplayMenuDetail = typed.netplayMenuDetail;
+    }
+    if (structSize >= offsetof(EFZNetplayState, revivalVersion) + sizeof(typed.revivalVersion)) {
         out.revivalVersion = sanitize_cstr(typed.revivalVersion, sizeof(typed.revivalVersion));
     }
-    if (structSize > offsetof(EFZNetplayState, inNetplayCharacterSelect)) {
+    if (structSize >= offsetof(EFZNetplayState, inNetplayCharacterSelect) + sizeof(typed.inNetplayCharacterSelect)) {
         out.inNetplayCharacterSelect = (typed.inNetplayCharacterSelect != 0);
     }
-    if (structSize > offsetof(EFZNetplayState, inNetplayMatch)) {
+    if (structSize >= offsetof(EFZNetplayState, inNetplayMatch) + sizeof(typed.inNetplayMatch)) {
         out.inNetplayMatch = (typed.inNetplayMatch != 0);
     }
     if (structSize >= offsetof(EFZNetplayState, capabilityFlags) + sizeof(typed.capabilityFlags)) {
@@ -969,7 +1031,82 @@ static bool parse_netplay_export_state_current(const unsigned char* base, uint32
     return true;
 }
 
-static bool parse_netplay_export_state_legacy(const unsigned char* base, uint32_t structSize, uint32_t version32, NetplayExportState& out) {
+static bool parse_netplay_export_state_v2_to_v4(const unsigned char* base, uint32_t structSize, uint32_t version32, NetplayExportState& out) {
+    EFZNetplayStateCompatV4 typed{};
+    const size_t toCopy = (std::min)(static_cast<size_t>(structSize), sizeof(EFZNetplayStateCompatV4));
+    std::memcpy(&typed, base, toCopy);
+
+    out.version = version32;
+    out.structSize = structSize;
+    out.lastUpdateTick = typed.lastUpdateTick;
+    out.sessionMode = typed.sessionMode;
+    out.sessionPhase = typed.sessionPhase;
+    out.localSide = typed.localSide;
+    out.p1Wins = typed.p1Wins;
+    out.p2Wins = typed.p2Wins;
+    out.matchCounter = typed.matchCounter;
+    out.localNickname = sanitize_cstr(typed.localNickname, sizeof(typed.localNickname));
+    out.p1Name = sanitize_cstr(typed.p1Name, sizeof(typed.p1Name));
+    out.p2Name = sanitize_cstr(typed.p2Name, sizeof(typed.p2Name));
+    out.pingMs = typed.pingMs;
+    out.rollbackFrames = typed.rollbackFrames;
+
+    if (structSize >= offsetof(EFZNetplayStateCompatV4, inNetplayMenu) + sizeof(typed.inNetplayMenu)) {
+        out.inNetplayMenu = (typed.inNetplayMenu != 0);
+    }
+    if (structSize >= offsetof(EFZNetplayStateCompatV4, netplayMenuScreen) + sizeof(typed.netplayMenuScreen)) {
+        out.netplayMenuScreen = normalize_legacy_menu_screen(typed.netplayMenuScreen);
+    }
+    if (structSize >= offsetof(EFZNetplayStateCompatV4, revivalVersion) + sizeof(typed.revivalVersion)) {
+        out.revivalVersion = sanitize_cstr(typed.revivalVersion, sizeof(typed.revivalVersion));
+    }
+    if (structSize >= offsetof(EFZNetplayStateCompatV4, inNetplayCharacterSelect) + sizeof(typed.inNetplayCharacterSelect)) {
+        out.inNetplayCharacterSelect = (typed.inNetplayCharacterSelect != 0);
+    }
+    if (structSize >= offsetof(EFZNetplayStateCompatV4, inNetplayMatch) + sizeof(typed.inNetplayMatch)) {
+        out.inNetplayMatch = (typed.inNetplayMatch != 0);
+    }
+    if (structSize >= offsetof(EFZNetplayStateCompatV4, capabilityFlags) + sizeof(typed.capabilityFlags)) {
+        out.capabilityFlags = typed.capabilityFlags;
+        out.hasCapabilityFlags = true;
+    }
+    if (structSize >= offsetof(EFZNetplayStateCompatV4, stateSeq) + sizeof(typed.stateSeq)) {
+        out.stateSeq = typed.stateSeq;
+    }
+    if (structSize >= offsetof(EFZNetplayStateCompatV4, sessionId) + sizeof(typed.sessionId)) {
+        out.sessionId = typed.sessionId;
+    }
+    if (structSize >= offsetof(EFZNetplayStateCompatV4, setId) + sizeof(typed.setId)) {
+        out.setId = typed.setId;
+    }
+    if (structSize >= offsetof(EFZNetplayStateCompatV4, activityPhase) + sizeof(typed.activityPhase)) {
+        out.activityPhase = typed.activityPhase;
+        out.hasActivityPhase = true;
+    }
+    if (structSize >= offsetof(EFZNetplayStateCompatV4, endReason) + sizeof(typed.endReason)) {
+        out.endReason = typed.endReason;
+        out.hasEndReason = true;
+    }
+    if (structSize >= offsetof(EFZNetplayStateCompatV4, localCursorCharId) + sizeof(typed.localCursorCharId)) {
+        out.p1CharId = typed.p1CharId;
+        out.p2CharId = typed.p2CharId;
+        out.p1Locked = (typed.p1Locked != 0);
+        out.p2Locked = (typed.p2Locked != 0);
+        out.localCursorCharId = typed.localCursorCharId;
+        out.hasCharSelectContext = true;
+    }
+    if (structSize >= offsetof(EFZNetplayStateCompatV4, roundTimerFrames) + sizeof(typed.roundTimerFrames)) {
+        out.stageId = typed.stageId;
+        out.roundIndex = typed.roundIndex;
+        out.isRoundActive = (typed.isRoundActive != 0);
+        out.roundTimerFrames = typed.roundTimerFrames;
+        out.hasMatchContext = true;
+    }
+    out.valid = true;
+    return true;
+}
+
+static bool parse_netplay_export_state_v1_legacy(const unsigned char* base, uint32_t structSize, uint32_t version32, NetplayExportState& out) {
     // Legacy layout from NETPLAY_STATE_EXPORT.md before lastUpdateTick field:
     // header (12), then sessionMode at +12.
     if (structSize < EFZ_NETPLAY_STATE_LEGACY_MIN_V1_SIZE) return false;
@@ -988,10 +1125,8 @@ static bool parse_netplay_export_state_legacy(const unsigned char* base, uint32_
     (void)read_i32_from_struct(base, structSize, 196, out.pingMs);
     (void)read_i32_from_struct(base, structSize, 200, out.rollbackFrames);
     if (204 < structSize) out.inNetplayMenu = (base[204] != 0);
-    if (205 < structSize) out.netplayMenuScreen = base[205];
+    if (205 < structSize) out.netplayMenuScreen = normalize_legacy_menu_screen(base[205]);
     if (206 < structSize) out.revivalVersion = read_cstr_from_struct(base, structSize, 206, 16);
-    // v3/v4 fields are appended after revivalVersion in the public struct and are
-    // read via parse_netplay_export_state_current() when structSize is large enough.
     out.valid = true;
     return true;
 }
@@ -1010,11 +1145,18 @@ static bool parse_netplay_export_state(const void* statePtr, NetplayExportState&
     if (!read_u32(base, 8, structSize)) return false;
     if (structSize < EFZ_NETPLAY_STATE_LEGACY_MIN_V1_SIZE || structSize > 4096) return false;
 
-    // Prefer typed parse from the public header layout; legacy fallback kept for older maps.
-    if (structSize >= offsetof(EFZNetplayState, rollbackFrames) + sizeof(int32_t)) {
-        if (parse_netplay_export_state_current(base, structSize, version32, out)) return true;
+    // v6 changed the layout in-place (larger localNickname and menu detail).
+    // Keep explicit parsers for both the refreshed ABI and the older v2-v4 ABI.
+    if (version32 >= 6) {
+        if (structSize >= offsetof(EFZNetplayState, rollbackFrames) + sizeof(int32_t)) {
+            if (parse_netplay_export_state_v6(base, structSize, version32, out)) return true;
+        }
+    } else {
+        if (structSize >= offsetof(EFZNetplayStateCompatV4, rollbackFrames) + sizeof(int32_t)) {
+            if (parse_netplay_export_state_v2_to_v4(base, structSize, version32, out)) return true;
+        }
     }
-    return parse_netplay_export_state_legacy(base, structSize, version32, out);
+    return parse_netplay_export_state_v1_legacy(base, structSize, version32, out);
 }
 
 using NetplayGetStateFn = const void* (__cdecl *)(void);
@@ -1052,10 +1194,53 @@ static const char* netplay_menu_screen_name(uint8_t id) {
         case EFZ_MENU_MAIN: return "Main menu";
         case EFZ_MENU_HOST: return "Host menu";
         case EFZ_MENU_JOIN: return "Join menu";
-        case EFZ_MENU_NICKNAME: return "Nickname menu";
-        case EFZ_MENU_LOBBY: return "Lobby menu";
+        case EFZ_MENU_PLAYER_ROOMS: return "Player Rooms";
+        case EFZ_MENU_OPTIONS: return "Options";
+        case EFZ_MENU_LOBBY: return "Lobby";
+        case EFZ_MENU_BATTLE_LOG: return "Battle Log";
         default: return "Netplay menu";
     }
+}
+
+static const char* netplay_menu_detail_name(uint8_t screen, uint8_t detail) {
+    switch (screen) {
+        case EFZ_MENU_PLAYER_ROOMS:
+            switch (detail) {
+                case EFZ_MENU_DETAIL_PLAYER_ROOMS_ROOT: return "Rooms";
+                case EFZ_MENU_DETAIL_PLAYER_ROOMS_JOIN: return "Join";
+                case EFZ_MENU_DETAIL_PLAYER_ROOMS_CREATE: return "Create";
+                default: return nullptr;
+            }
+        case EFZ_MENU_OPTIONS:
+            switch (detail) {
+                case EFZ_MENU_DETAIL_OPTIONS_ROOT: return "Categories";
+                case EFZ_MENU_DETAIL_OPTIONS_CATEGORY: return "Category";
+                case EFZ_MENU_DETAIL_OPTIONS_EDIT: return "Editing";
+                case EFZ_MENU_DETAIL_OPTIONS_MODAL: return "Modal";
+                default: return nullptr;
+            }
+        case EFZ_MENU_BATTLE_LOG:
+            switch (detail) {
+                case EFZ_MENU_DETAIL_BATTLE_LOG_SUMMARY_PROFILE: return "Profile summary";
+                case EFZ_MENU_DETAIL_BATTLE_LOG_SUMMARY_FULL: return "Full summary";
+                case EFZ_MENU_DETAIL_BATTLE_LOG_SUMMARY_SEARCH: return "Search summary";
+                case EFZ_MENU_DETAIL_BATTLE_LOG_BROWSER: return "Browser";
+                case EFZ_MENU_DETAIL_BATTLE_LOG_FILTERS: return "Filters";
+                case EFZ_MENU_DETAIL_BATTLE_LOG_SET_DETAILS: return "Set details";
+                default: return nullptr;
+            }
+        default:
+            return nullptr;
+    }
+}
+
+static std::string format_netplay_menu_state(const NetplayExportState& state) {
+    std::string out = netplay_menu_screen_name(state.netplayMenuScreen);
+    if (const char* detail = netplay_menu_detail_name(state.netplayMenuScreen, state.netplayMenuDetail)) {
+        out += " - ";
+        out += detail;
+    }
+    return out;
 }
 
 static const char* netplay_phase_name(int32_t phase) {
@@ -1274,6 +1459,7 @@ GameState GameStateProvider::get() {
     static uint8_t s_npLastEndReason = 0;
     static bool s_npLastMenu = false;
     static uint8_t s_npLastMenuScreen = 0;
+    static uint8_t s_npLastMenuDetail = EFZ_MENU_DETAIL_NONE;
     static bool s_npLastCharSelect = false;
     static bool s_npLastMatch = false;
     static uint32_t s_npLastSessionId = 0;
@@ -1302,13 +1488,14 @@ GameState GameStateProvider::get() {
             }
         }
         if (!s_npTransitionKnown) {
-            log("NPTransition: init mode=%s phase=%s activity=%s end=%s menu=%d/%u charsel=%d match=%d sid=%u set=%u",
+            log("NPTransition: init mode=%s phase=%s activity=%s end=%s menu=%d/%u/%u charsel=%d match=%d sid=%u set=%u",
                 netplay_mode_name(np.sessionMode),
                 netplay_phase_name(np.sessionPhase),
                 netplay_activity_name(np.activityPhase),
                 netplay_end_reason_name(np.endReason),
                 np.inNetplayMenu ? 1 : 0,
                 (unsigned)np.netplayMenuScreen,
+                (unsigned)np.netplayMenuDetail,
                 np.inNetplayCharacterSelect ? 1 : 0,
                 np.inNetplayMatch ? 1 : 0,
                 (unsigned)np.sessionId,
@@ -1322,18 +1509,19 @@ GameState GameStateProvider::get() {
                 np.endReason != s_npLastEndReason ||
                 np.inNetplayMenu != s_npLastMenu ||
                 np.netplayMenuScreen != s_npLastMenuScreen ||
+                np.netplayMenuDetail != s_npLastMenuDetail ||
                 np.inNetplayCharacterSelect != s_npLastCharSelect ||
                 np.inNetplayMatch != s_npLastMatch ||
                 np.sessionId != s_npLastSessionId ||
                 np.setId != s_npLastSetId;
             if (changed) {
-                log("NPTransition: mode %s -> %s | phase %s -> %s | activity %s -> %s | end %s -> %s | menu %d/%u -> %d/%u | charsel %d -> %d | match %d -> %d | sid %u -> %u | set %u -> %u",
+                log("NPTransition: mode %s -> %s | phase %s -> %s | activity %s -> %s | end %s -> %s | menu %d/%u/%u -> %d/%u/%u | charsel %d -> %d | match %d -> %d | sid %u -> %u | set %u -> %u",
                     netplay_mode_name(s_npLastMode), netplay_mode_name(np.sessionMode),
                     netplay_phase_name(s_npLastPhase), netplay_phase_name(np.sessionPhase),
                     netplay_activity_name(s_npLastActivity), netplay_activity_name(np.activityPhase),
                     netplay_end_reason_name(s_npLastEndReason), netplay_end_reason_name(np.endReason),
-                    s_npLastMenu ? 1 : 0, (unsigned)s_npLastMenuScreen,
-                    np.inNetplayMenu ? 1 : 0, (unsigned)np.netplayMenuScreen,
+                    s_npLastMenu ? 1 : 0, (unsigned)s_npLastMenuScreen, (unsigned)s_npLastMenuDetail,
+                    np.inNetplayMenu ? 1 : 0, (unsigned)np.netplayMenuScreen, (unsigned)np.netplayMenuDetail,
                     s_npLastCharSelect ? 1 : 0, np.inNetplayCharacterSelect ? 1 : 0,
                     s_npLastMatch ? 1 : 0, np.inNetplayMatch ? 1 : 0,
                     (unsigned)s_npLastSessionId, (unsigned)np.sessionId,
@@ -1346,6 +1534,7 @@ GameState GameStateProvider::get() {
         s_npLastEndReason = np.endReason;
         s_npLastMenu = np.inNetplayMenu;
         s_npLastMenuScreen = np.netplayMenuScreen;
+        s_npLastMenuDetail = np.netplayMenuDetail;
         s_npLastCharSelect = np.inNetplayCharacterSelect;
         s_npLastMatch = np.inNetplayMatch;
         s_npLastSessionId = np.sessionId;
@@ -1355,6 +1544,7 @@ GameState GameStateProvider::get() {
         s_npTransitionKnown = false;
         s_npSeqKnown = false;
         s_npSeqWasStale = false;
+        s_npLastMenuDetail = EFZ_MENU_DETAIL_NONE;
     }
     if (haveNetplayExport && np.sessionMode != EFZ_SESSION_NONE) {
         if (np.sessionId != 0 && np.sessionId != s_exportNickSessionId) {
@@ -1415,7 +1605,7 @@ GameState GameStateProvider::get() {
     }
     const char* onlName = online_state_name(onl);
     if (haveNetplayExport) {
-        log("GSPoll#%lu: gameModeRaw=%u gameMode='%s' onlineState='%s' netplay(mode=%d phase=%d side=%d menu=%d/%u cs=%d match=%d act=%u:%s end=%u:%s caps=0x%X seq=%u sid=%u set=%u)",
+        log("GSPoll#%lu: gameModeRaw=%u gameMode='%s' onlineState='%s' netplay(mode=%d phase=%d side=%d menu=%d/%u/%u cs=%d match=%d act=%u:%s end=%u:%s caps=0x%X seq=%u sid=%u set=%u)",
             s_poll,
             (unsigned)gmRaw,
             gmName ? gmName : "?",
@@ -1425,6 +1615,7 @@ GameState GameStateProvider::get() {
             np.localSide,
             np.inNetplayMenu ? 1 : 0,
             (unsigned)np.netplayMenuScreen,
+            (unsigned)np.netplayMenuDetail,
             np.inNetplayCharacterSelect ? 1 : 0,
             np.inNetplayMatch ? 1 : 0,
             (unsigned)np.activityPhase,
@@ -1674,7 +1865,7 @@ GameState GameStateProvider::get() {
     // Dedicated netplay-menu state from efz_netplay_mod export.
     if (inNetplayMenuState) {
         gs.details = "In Netplay Menu";
-        std::string state = netplay_menu_screen_name(np.netplayMenuScreen);
+        std::string state = format_netplay_menu_state(np);
         if (np.sessionPhase != EFZ_PHASE_IDLE &&
             np.sessionPhase != EFZ_PHASE_CONNECTED) {
             state += " (" + std::string(netplay_phase_name(np.sessionPhase)) + ")";

@@ -17,6 +17,14 @@ std::atomic<bool> g_running{false};
 std::thread g_worker;
 HMODULE g_selfModule = nullptr;
 
+static void debug_trace(const wchar_t* msg) {
+#if EFZDA_ENABLE_LOGGING
+    OutputDebugStringW(msg);
+#else
+    (void)msg;
+#endif
+}
+
 std::wstring get_module_dir(HMODULE hMod) {
     wchar_t path[MAX_PATH];
     GetModuleFileNameW(hMod, path, MAX_PATH);
@@ -33,10 +41,10 @@ void worker_main(HMODULE hMod) {
     // Initialize immediately
 
     auto moduleDir = get_module_dir(hMod);
-    OutputDebugStringW(L"[EfzRichPresence] About to init_logger\n");
+    debug_trace(L"[EfzRichPresence] About to init_logger\n");
     efzda::init_logger(moduleDir);
     efzda::log("Stage: after init_logger");
-    OutputDebugStringW(L"[EfzRichPresence] init_logger done\n");
+    debug_trace(L"[EfzRichPresence] init_logger done\n");
     // Console disabled by default; opt-in via EFZDA_ENABLE_CONSOLE=1
     wchar_t envBuf[8];
     DWORD n = GetEnvironmentVariableW(L"EFZDA_ENABLE_CONSOLE", envBuf, _countof(envBuf));
@@ -49,17 +57,17 @@ void worker_main(HMODULE hMod) {
     try {
         efzda::log("EfzRichPresence v%s starting...", EFZDA_VERSION);
     } catch (...) {
-        OutputDebugStringW(L"[EfzRichPresence] log(starting) threw\n");
+        debug_trace(L"[EfzRichPresence] log(starting) threw\n");
     }
     efzda::DiscordClient discord;
     bool discordReady = false;
     try {
         auto cfg = efzda::load_config(moduleDir);
         efzda::log("Stage: after load_config");
-        OutputDebugStringW(L"[EfzRichPresence] Config loaded\n");
+        debug_trace(L"[EfzRichPresence] Config loaded\n");
         discordReady = discord.init(cfg.discordAppId);
         efzda::log("Stage: after discord.init (%s)", discordReady ? "ok" : "fail");
-        OutputDebugStringW(discordReady ? L"[EfzRichPresence] Discord init OK\n" : L"[EfzRichPresence] Discord init failed\n");
+        debug_trace(discordReady ? L"[EfzRichPresence] Discord init OK\n" : L"[EfzRichPresence] Discord init failed\n");
     } catch (...) {
         efzda::log("Stage: exception during config/discord init; continuing with Discord disabled");
     }
@@ -67,7 +75,7 @@ void worker_main(HMODULE hMod) {
     efzda::GameStateProvider provider;
     efzda::GameState last{};
     efzda::log("Stage: entering poll loop");
-    OutputDebugStringW(L"[EfzRichPresence] Entering poll loop\n");
+    debug_trace(L"[EfzRichPresence] Entering poll loop\n");
 
     // Optional: clear-before-update to mitigate sticky presence in some clients
     bool clearBeforeUpdate = false;
@@ -216,7 +224,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID) {
     switch (ul_reason_for_call) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hModule);
-        OutputDebugStringW(L"[EfzRichPresence] DLL_PROCESS_ATTACH\n");
+        debug_trace(L"[EfzRichPresence] DLL_PROCESS_ATTACH\n");
         g_running = true;
         try {
             // Pin the module to avoid being unloaded while worker is running
@@ -231,7 +239,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID) {
             g_worker = std::thread(worker_main, g_selfModule);
             g_worker.detach();
         } catch (...) {
-            OutputDebugStringW(L"[EfzRichPresence] Failed to start worker thread\n");
+            debug_trace(L"[EfzRichPresence] Failed to start worker thread\n");
             g_running = false;
         }
         break;
