@@ -822,6 +822,24 @@ struct NetplayExportState {
     uint8_t roundIndex = 0xFF;
     bool isRoundActive = false;
     uint16_t roundTimerFrames = 0xFFFF;
+    // Async hosting (v7) — only meaningful when hasAsyncHost is set.
+    bool hasAsyncHost = false;
+    bool asyncHostActive = false;
+    bool asyncHostMinimized = false;
+    bool asyncHostPeerFound = false;
+    bool asyncHostTimedOut = false;
+    uint16_t hostPort = 0;
+    // Extended network metrics (v7) — only meaningful when hasNetDetail is set.
+    bool hasNetDetail = false;
+    int32_t avgPingMs = -1;
+    int32_t minPingMs = -1;
+    int32_t maxPingMs = -1;
+    int32_t recommendedDelay = -1;
+    int32_t minDelay = -1;
+    int32_t maxDelay = -1;
+    // Connection endpoint (v7) — only meaningful when hasConnection is set.
+    bool hasConnection = false;
+    std::string connectionAddress;
     std::string localNickname;
     std::string p1Name;
     std::string p2Name;
@@ -1026,6 +1044,33 @@ static bool parse_netplay_export_state_v6(const unsigned char* base, uint32_t st
         out.isRoundActive = (typed.isRoundActive != 0);
         out.roundTimerFrames = typed.roundTimerFrames;
         out.hasMatchContext = true;
+    }
+    // --- v7 field groups. Each is valid only when (a) the struct is large
+    // enough to contain it (forward-compat) and (b) its capability bit is set
+    // (the source may drop the bit to 0 on ticks where the data is unavailable).
+    if (structSize >= offsetof(EFZNetplayState, hostPort) + sizeof(typed.hostPort) &&
+        (out.capabilityFlags & EFZ_CAP_ASYNC_HOST) != 0) {
+        out.hasAsyncHost = true;
+        out.asyncHostActive = (typed.asyncHostActive != 0);
+        out.asyncHostMinimized = (typed.asyncHostMinimized != 0);
+        out.asyncHostPeerFound = (typed.asyncHostPeerFound != 0);
+        out.asyncHostTimedOut = (typed.asyncHostTimedOut != 0);
+        out.hostPort = typed.hostPort;
+    }
+    if (structSize >= offsetof(EFZNetplayState, maxDelay) + sizeof(typed.maxDelay) &&
+        (out.capabilityFlags & EFZ_CAP_NET_DETAIL) != 0) {
+        out.hasNetDetail = true;
+        out.avgPingMs = typed.avgPingMs;
+        out.minPingMs = typed.minPingMs;
+        out.maxPingMs = typed.maxPingMs;
+        out.recommendedDelay = typed.recommendedDelay;
+        out.minDelay = typed.minDelay;
+        out.maxDelay = typed.maxDelay;
+    }
+    if (structSize >= offsetof(EFZNetplayState, connectionAddress) + sizeof(typed.connectionAddress) &&
+        (out.capabilityFlags & EFZ_CAP_CONNECTION) != 0) {
+        out.connectionAddress = sanitize_cstr(typed.connectionAddress, sizeof(typed.connectionAddress));
+        out.hasConnection = !out.connectionAddress.empty();
     }
     out.valid = true;
     return true;
@@ -1243,15 +1288,31 @@ static std::string format_netplay_menu_state(const NetplayExportState& state) {
     return out;
 }
 
-static const char* netplay_phase_name(int32_t phase) {
+static const char* netplay_phase_name(int32_t phase, int32_t mode)
+{
     switch (phase) {
-        case EFZ_PHASE_IDLE: return "Idle";
-        case EFZ_PHASE_CONNECTING: return "Connecting";
-        case EFZ_PHASE_DELAY_SETUP: return "Delay setup";
-        case EFZ_PHASE_CONNECTED: return "Connected";
-        case EFZ_PHASE_FAILED: return "Failed";
-        case EFZ_PHASE_SESSION_ENDED: return "Session ended";
-        default: return "Unknown";
+        case EFZ_PHASE_IDLE:
+            return "Idle";
+
+        case EFZ_PHASE_CONNECTING:
+            return mode == EFZ_SESSION_HOSTING
+                ? "Hosting"
+                : "Connecting";
+
+        case EFZ_PHASE_DELAY_SETUP:
+            return "Delay setup";
+
+        case EFZ_PHASE_CONNECTED:
+            return "Connected";
+
+        case EFZ_PHASE_FAILED:
+            return "Failed";
+
+        case EFZ_PHASE_SESSION_ENDED:
+            return "Session ended";
+
+        default:
+            return "Unknown";
     }
 }
 
@@ -1276,6 +1337,7 @@ static const char* netplay_activity_name(uint8_t activity) {
         case EFZ_ACTIVITY_LOADING: return "Loading";
         case EFZ_ACTIVITY_MATCH: return "Match";
         case EFZ_ACTIVITY_RESULTS: return "Results";
+        case EFZ_ACTIVITY_HOST_IDLE: return "Host idle";
         default: return "Unknown";
     }
 }
@@ -1490,7 +1552,7 @@ GameState GameStateProvider::get() {
         if (!s_npTransitionKnown) {
             log("NPTransition: init mode=%s phase=%s activity=%s end=%s menu=%d/%u/%u charsel=%d match=%d sid=%u set=%u",
                 netplay_mode_name(np.sessionMode),
-                netplay_phase_name(np.sessionPhase),
+                netplay_phase_name(np.sessionPhase, np.sessionMode),
                 netplay_activity_name(np.activityPhase),
                 netplay_end_reason_name(np.endReason),
                 np.inNetplayMenu ? 1 : 0,
@@ -1517,7 +1579,8 @@ GameState GameStateProvider::get() {
             if (changed) {
                 log("NPTransition: mode %s -> %s | phase %s -> %s | activity %s -> %s | end %s -> %s | menu %d/%u/%u -> %d/%u/%u | charsel %d -> %d | match %d -> %d | sid %u -> %u | set %u -> %u",
                     netplay_mode_name(s_npLastMode), netplay_mode_name(np.sessionMode),
-                    netplay_phase_name(s_npLastPhase), netplay_phase_name(np.sessionPhase),
+                    netplay_phase_name(s_npLastPhase, s_npLastMode),
+                    netplay_phase_name(np.sessionPhase, np.sessionMode),
                     netplay_activity_name(s_npLastActivity), netplay_activity_name(np.activityPhase),
                     netplay_end_reason_name(s_npLastEndReason), netplay_end_reason_name(np.endReason),
                     s_npLastMenu ? 1 : 0, (unsigned)s_npLastMenuScreen, (unsigned)s_npLastMenuDetail,
@@ -1626,6 +1689,21 @@ GameState GameStateProvider::get() {
             (unsigned)np.stateSeq,
             (unsigned)np.sessionId,
             (unsigned)np.setId);
+        if (np.hasAsyncHost || np.hasNetDetail || np.hasConnection) {
+            log("GSPoll#%lu: netplay-v7(asyncHost=%d active=%d min=%d peer=%d timeout=%d port=%u | netDetail=%d avg=%d min=%d max=%d recDelay=%d delayRange=%d-%d | conn=%d addr='%s')",
+                s_poll,
+                np.hasAsyncHost ? 1 : 0,
+                np.asyncHostActive ? 1 : 0,
+                np.asyncHostMinimized ? 1 : 0,
+                np.asyncHostPeerFound ? 1 : 0,
+                np.asyncHostTimedOut ? 1 : 0,
+                (unsigned)np.hostPort,
+                np.hasNetDetail ? 1 : 0,
+                np.avgPingMs, np.minPingMs, np.maxPingMs,
+                np.recommendedDelay, np.minDelay, np.maxDelay,
+                np.hasConnection ? 1 : 0,
+                np.connectionAddress.c_str());
+        }
     } else {
         log("GSPoll#%lu: gameModeRaw=%u gameMode='%s' onlineState='%s'",
             s_poll, (unsigned)gmRaw, gmName ? gmName : "?", onlName ? onlName : "?");
@@ -1655,6 +1733,7 @@ GameState GameStateProvider::get() {
     bool inNetplayLoadingState = false;
     bool inNetplayMatchState = haveNetplayExport && np.inNetplayMatch;
     bool inNetplayResultsState = false;
+    bool inNetplayHostIdleState = false;
     bool useActivityPhase =
         haveNetplayExport &&
         np.hasActivityPhase &&
@@ -1669,6 +1748,7 @@ GameState GameStateProvider::get() {
         inNetplayLoadingState = false;
         inNetplayMatchState = false;
         inNetplayResultsState = false;
+        inNetplayHostIdleState = false;
         switch (np.activityPhase) {
             case EFZ_ACTIVITY_MENU: inNetplayMenuState = true; break;
             case EFZ_ACTIVITY_CONNECTING: inNetplayConnectingState = true; break;
@@ -1677,6 +1757,7 @@ GameState GameStateProvider::get() {
             case EFZ_ACTIVITY_LOADING: inNetplayLoadingState = true; break;
             case EFZ_ACTIVITY_MATCH: inNetplayMatchState = true; break;
             case EFZ_ACTIVITY_RESULTS: inNetplayResultsState = true; break;
+            case EFZ_ACTIVITY_HOST_IDLE: inNetplayHostIdleState = true; break;
             default: break;
         }
     }
@@ -1782,6 +1863,7 @@ GameState GameStateProvider::get() {
         inNetplayLoadingState = false;
         inNetplayMatchState = false;
         inNetplayResultsState = false;
+        inNetplayHostIdleState = false;
     }
 
     bool exportSnapshotResolved = false;
@@ -1868,7 +1950,7 @@ GameState GameStateProvider::get() {
         std::string state = format_netplay_menu_state(np);
         if (np.sessionPhase != EFZ_PHASE_IDLE &&
             np.sessionPhase != EFZ_PHASE_CONNECTED) {
-            state += " (" + std::string(netplay_phase_name(np.sessionPhase)) + ")";
+            state += " (" + std::string(netplay_phase_name(np.sessionPhase, np.sessionMode)) + ")";
         }
         gs.state = state;
         gs.largeImageKey = "efz_icon";
@@ -1877,6 +1959,30 @@ GameState GameStateProvider::get() {
         gs.smallImageText.clear();
         s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw;
         log("GSPoll#%lu: netplay-menu -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
+        return gs;
+    }
+
+    // Background ("async") hosting: a listener is alive while the local player
+    // keeps using EFZ normally. This is NOT a live match, so it gets its own
+    // short status instead of falling through to the connecting/phase wording
+    // (which would otherwise read "Connecting..." for a host that is merely
+    // waiting for an opponent).
+    if (inNetplayHostIdleState) {
+        std::string selfNick = !np.localNickname.empty() ? np.localNickname : std::string();
+        gs.details = selfNick.empty() ? "Hosting" : ("Hosting (" + selfNick + ")");
+        if (np.hasAsyncHost && np.asyncHostPeerFound) {
+            gs.state = "Opponent found...";
+        } else {
+            gs.state = "Waiting for the opponent...";
+        }
+        gs.largeImageKey = "efz_icon";
+        gs.largeImageText = "Hosting";
+        gs.smallImageKey.clear();
+        gs.smallImageText.clear();
+        s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw;
+        log("GSPoll#%lu: netplay-host-idle -> details='%s' state='%s' (peerFound=%d port=%u)",
+            s_poll, gs.details.c_str(), gs.state.c_str(),
+            np.asyncHostPeerFound ? 1 : 0, (unsigned)np.hostPort);
         return gs;
     }
 
