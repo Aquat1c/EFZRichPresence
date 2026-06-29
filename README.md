@@ -3,7 +3,7 @@
 Windows DLL mod that publishes Discord Rich Presence for Eternal Fighter Zero (EFZ).
 
 It reads EFZ state from process memory and integrates EfzRevival for online status, nicknames, current player side, and set scores.
-Currently supports 1.02e, 1.02f, 1.02g, 1.02h!!! and 1.02i!!! versions of EfzRevival.
+Currently supports 1.02e, 1.02f, 1.02g, 1.02h!!!, 1.02i!!! and 1.02j versions of EfzRevival.
 
 ## Features
 

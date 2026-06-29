@@ -1,0 +1,184 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CMake: Configure VS 2026 Win32",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--preset", "vs2026-Win32"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "CMake: Build VS 2026 Win32 (RelWithDebInfo)",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "vs2026-Win32"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$msCompile",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "dependsOrder": "sequence",
+      "dependsOn": "CMake: Configure VS 2026 Win32"
+    },
+    {
+      "label": "CMake: Build VS 2026 Win32 (Release)",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "vs2026-Win32-release"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$msCompile",
+      "group": "build",
+      "dependsOrder": "sequence",
+      "dependsOn": "CMake: Configure VS 2026 Win32"
+    },
+    {
+      "label": "CMake: Build VS 2026 Win32 (Debug)",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "vs2026-Win32-debug"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$msCompile",
+      "group": "build",
+      "dependsOrder": "sequence",
+      "dependsOn": "CMake: Configure VS 2026 Win32"
+    },
+    {
+      "label": "CMake: Rebuild VS 2026 Win32 (RelWithDebInfo)",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "vs2026-Win32", "--clean-first"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$msCompile",
+      "group": "build",
+      "dependsOrder": "sequence",
+      "dependsOn": "CMake: Configure VS 2026 Win32"
+    },
+    {
+      "label": "CMake: Rebuild VS 2026 Win32 (Release)",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "vs2026-Win32-release", "--clean-first"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$msCompile",
+      "group": "build",
+      "dependsOrder": "sequence",
+      "dependsOn": "CMake: Configure VS 2026 Win32"
+    },
+    {
+      "label": "CMake: Rebuild VS 2026 Win32 (Debug)",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "vs2026-Win32-debug", "--clean-first"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$msCompile",
+      "group": "build",
+      "dependsOrder": "sequence",
+      "dependsOn": "CMake: Configure VS 2026 Win32"
+    },
+    {
+      "label": "CMake: Configure VS 2022 Win32",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--preset", "vs2022-Win32"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "CMake: Build VS 2022 Win32 (RelWithDebInfo)",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "vs2022-Win32"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$msCompile",
+      "group": "build",
+      "dependsOrder": "sequence",
+      "dependsOn": "CMake: Configure VS 2022 Win32"
+    },
+    {
+      "label": "CMake: Build VS 2022 Win32 (Release)",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "vs2022-Win32-release"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$msCompile",
+      "group": "build",
+      "dependsOrder": "sequence",
+      "dependsOn": "CMake: Configure VS 2022 Win32"
+    },
+    {
+      "label": "CMake: Build VS 2022 Win32 (Debug)",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "vs2022-Win32-debug"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$msCompile",
+      "group": "build",
+      "dependsOrder": "sequence",
+      "dependsOn": "CMake: Configure VS 2022 Win32"
+    },
+    {
+      "label": "CMake: Rebuild VS 2022 Win32 (RelWithDebInfo)",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "vs2022-Win32", "--clean-first"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$msCompile",
+      "group": "build",
+      "dependsOrder": "sequence",
+      "dependsOn": "CMake: Configure VS 2022 Win32"
+    },
+    {
+      "label": "CMake: Rebuild VS 2022 Win32 (Release)",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "vs2022-Win32-release", "--clean-first"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$msCompile",
+      "group": "build",
+      "dependsOrder": "sequence",
+      "dependsOn": "CMake: Configure VS 2022 Win32"
+    },
+    {
+      "label": "CMake: Rebuild VS 2022 Win32 (Debug)",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "vs2022-Win32-debug", "--clean-first"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$msCompile",
+      "group": "build",
+      "dependsOrder": "sequence",
+      "dependsOn": "CMake: Configure VS 2022 Win32"
+    }
+  ]
+}
