@@ -56,7 +56,8 @@ constexpr uintptr_t CURRENT_PLAYER_OFFSET_1_02i = 0x2B0; // verified from 1.02i 
 
 // From efz-training-mode
 constexpr uintptr_t GAME_MODE_OFFSET = 0x1364; // byte in game state struct
-// Choose actual offsets at runtime based on EFZ window title ("-Revival- 1.02e/h/i").
+// Choose legacy offsets at runtime based on the detected Revival build.
+// 1.02j uses the separate role-aware reader below.
 
 static inline unsigned long long ticks() { return GetTickCount64(); }
 // Silent memory read (no logging), for probing purposes
@@ -121,7 +122,7 @@ bool safe_read_bytes(const void* addr, void* buffer, size_t size) {
 }
 
 // --- EfzRevival version detection and RVA selection ---
-enum class EfzRevivalVersion : int { Unknown = 0, Vanilla, Revival102e, Revival102f, Revival102g, Revival102h, Revival102i, Other };
+enum class EfzRevivalVersion : int { Unknown = 0, Vanilla, Revival102e, Revival102f, Revival102g, Revival102h, Revival102i, Revival102j, Other };
 
 // PE TimeDateStamp values from decompilation/release inventory (used by netplay mod too)
 constexpr DWORD REVIVAL_TS_102E = 0x5EA876B0;
@@ -129,6 +130,7 @@ constexpr DWORD REVIVAL_TS_102F = 0x5F8C58A3;
 constexpr DWORD REVIVAL_TS_102G = 0x6240CE73;
 constexpr DWORD REVIVAL_TS_102H = 0x62929371;
 constexpr DWORD REVIVAL_TS_102I = 0x63BF27EA;
+constexpr DWORD REVIVAL_TS_102J = 0x6A36A6AE;
 
 static EfzRevivalVersion DetectEfzRevivalVersionByTimestamp() {
     HMODULE revival = GetModuleHandleW(L"EfzRevival.dll");
@@ -148,6 +150,7 @@ static EfzRevivalVersion DetectEfzRevivalVersionByTimestamp() {
         case REVIVAL_TS_102G: return EfzRevivalVersion::Revival102g;
         case REVIVAL_TS_102H: return EfzRevivalVersion::Revival102h;
         case REVIVAL_TS_102I: return EfzRevivalVersion::Revival102i;
+        case REVIVAL_TS_102J: return EfzRevivalVersion::Revival102j;
         default: return EfzRevivalVersion::Unknown;
     }
 }
@@ -197,6 +200,7 @@ static EfzRevivalVersion DetectEfzRevivalVersion() {
         else if (lower.find("1.02g") != std::string::npos) ver = EfzRevivalVersion::Revival102g;
         else if (lower.find("1.02h") != std::string::npos) ver = EfzRevivalVersion::Revival102h;
         else if (lower.find("1.02i") != std::string::npos) ver = EfzRevivalVersion::Revival102i;
+        else if (lower.find("1.02j") != std::string::npos) ver = EfzRevivalVersion::Revival102j;
         else ver = EfzRevivalVersion::Other;
     } else {
         ver = EfzRevivalVersion::Vanilla;
@@ -558,6 +562,216 @@ static std::string read_nickname(uintptr_t revivalBase, uintptr_t primaryOff, ui
     return {};
 }
 
+// EfzRevival 1.02j is a MinGW rebuild with role-specific session layouts.
+// It cannot use the legacy "one session base plus fallback offsets" readers.
+constexpr uintptr_t REVIVAL_102J_SESSION_PTR_RVA = 0x0014E980;
+constexpr uintptr_t REVIVAL_102J_SESSION_ROLE_RVA = 0x0014EC40;
+// DLL+0x14E984 is PRNG state in 1.02j, not a player/session-side field.
+
+constexpr uintptr_t REVIVAL_102J_COMPACT_VTABLE_RVA = 0x0016FEB0;
+constexpr uintptr_t REVIVAL_102J_ROLLBACK_VTABLE_RVA = 0x0016FEF0;
+constexpr uintptr_t REVIVAL_102J_SPECTATOR_VTABLE_RVA = 0x0016FF20;
+constexpr uintptr_t REVIVAL_102J_REPLAY_VTABLE_RVA = 0x0016FF50;
+constexpr uintptr_t REVIVAL_102J_PRACTICE_VTABLE_RVA = 0x0016FF80;
+
+constexpr uintptr_t REVIVAL_102J_ROLLBACK_SIDE_OFFSET = 0x0308;
+constexpr uintptr_t REVIVAL_102J_ROLLBACK_P1_NAME_OFFSET = 0x045E;
+constexpr uintptr_t REVIVAL_102J_ROLLBACK_P2_NAME_OFFSET = 0x04DE;
+constexpr uintptr_t REVIVAL_102J_ROLLBACK_P1_WINS_OFFSET = 0x0564;
+constexpr uintptr_t REVIVAL_102J_ROLLBACK_P2_WINS_OFFSET = 0x0568;
+
+constexpr uintptr_t REVIVAL_102J_SPECTATOR_P1_NAME_OFFSET = 0x0170;
+constexpr uintptr_t REVIVAL_102J_SPECTATOR_P2_NAME_OFFSET = 0x0188;
+constexpr uintptr_t REVIVAL_102J_SPECTATOR_P1_WINS_OFFSET = 0x01C4;
+constexpr uintptr_t REVIVAL_102J_SPECTATOR_P2_WINS_OFFSET = 0x01C8;
+
+constexpr uintptr_t REVIVAL_102J_COMPACT_P1_WINS_OFFSET = 0x036C;
+constexpr uintptr_t REVIVAL_102J_COMPACT_P2_WINS_OFFSET = 0x0370;
+
+static_assert(REVIVAL_102J_ROLLBACK_P2_WINS_OFFSET == REVIVAL_102J_ROLLBACK_P1_WINS_OFFSET + sizeof(int32_t));
+static_assert(REVIVAL_102J_SPECTATOR_P2_WINS_OFFSET == REVIVAL_102J_SPECTATOR_P1_WINS_OFFSET + sizeof(int32_t));
+static_assert(REVIVAL_102J_COMPACT_P2_WINS_OFFSET == REVIVAL_102J_COMPACT_P1_WINS_OFFSET + sizeof(int32_t));
+
+enum class Revival102jSessionKind {
+    Invalid,
+    Rollback,
+    Spectator,
+    Compact,
+    Replay,
+    Practice,
+};
+
+struct Revival102jSessionIdentity {
+    int role = -1;
+    uintptr_t session = 0;
+    uintptr_t vtableRva = 0;
+    Revival102jSessionKind kind = Revival102jSessionKind::Invalid;
+};
+
+struct Revival102jSessionSnapshot {
+    bool valid = false;
+    Revival102jSessionIdentity identity{};
+    int selfIndex = -1;
+    int p1Wins = 0;
+    int p2Wins = 0;
+    bool scoresValid = false;
+    std::string p1Nickname;
+    std::string p2Nickname;
+};
+
+struct Revival102jScorePair {
+    int32_t p1 = 0;
+    int32_t p2 = 0;
+};
+
+struct Revival102jMinGwWstringHeader {
+    uint32_t charsAddress = 0;
+    int32_t length = 0;
+};
+
+static_assert(sizeof(Revival102jScorePair) == 8);
+static_assert(sizeof(Revival102jMinGwWstringHeader) == 8);
+
+static bool same_revival_102j_identity(
+    const Revival102jSessionIdentity& a,
+    const Revival102jSessionIdentity& b) {
+    return a.role == b.role &&
+           a.session == b.session &&
+           a.vtableRva == b.vtableRva &&
+           a.kind == b.kind;
+}
+
+static bool read_revival_102j_identity(
+    uintptr_t revivalBase,
+    Revival102jSessionIdentity& out) {
+    out = Revival102jSessionIdentity{};
+    if (!revivalBase || DetectEfzRevivalVersion() != EfzRevivalVersion::Revival102j) return false;
+
+    int role = -1;
+    uintptr_t session = 0;
+    if (!safe_read(reinterpret_cast<void*>(revivalBase + REVIVAL_102J_SESSION_ROLE_RVA), role) ||
+        !safe_read(reinterpret_cast<void*>(revivalBase + REVIVAL_102J_SESSION_PTR_RVA), session) ||
+        session == 0 || role < 0 || role > 3) {
+        return false;
+    }
+
+    uintptr_t vtable = 0;
+    if (!safe_read(reinterpret_cast<void*>(session), vtable) || vtable < revivalBase) return false;
+    const uintptr_t vtableRva = vtable - revivalBase;
+
+    Revival102jSessionKind kind = Revival102jSessionKind::Invalid;
+    if (role == 0 && vtableRva == REVIVAL_102J_ROLLBACK_VTABLE_RVA) {
+        kind = Revival102jSessionKind::Rollback;
+    } else if (role == 1 && vtableRva == REVIVAL_102J_SPECTATOR_VTABLE_RVA) {
+        kind = Revival102jSessionKind::Spectator;
+    } else if (role == 2 && vtableRva == REVIVAL_102J_REPLAY_VTABLE_RVA) {
+        kind = Revival102jSessionKind::Replay;
+    } else if (role == 2 && vtableRva == REVIVAL_102J_PRACTICE_VTABLE_RVA) {
+        kind = Revival102jSessionKind::Practice;
+    } else if (role == 3 && vtableRva == REVIVAL_102J_COMPACT_VTABLE_RVA) {
+        kind = Revival102jSessionKind::Compact;
+    } else {
+        efzda::log("[tick=%llu] REVIVAL102J rejected session identity role=%d session=%p vtableRva=0x%lX",
+                   ticks(), role, reinterpret_cast<void*>(session), (unsigned long)vtableRva);
+        return false;
+    }
+
+    out.role = role;
+    out.session = session;
+    out.vtableRva = vtableRva;
+    out.kind = kind;
+    return true;
+}
+
+static std::string revival_nickname_from_wide(const std::wstring& wide) {
+    std::string nickname = narrow(sanitize_nickname_w(wide));
+    if (nickname == "Player" || nickname == "Player 1" || nickname == "Player 2") return {};
+    return nickname;
+}
+
+static std::string read_revival_102j_inline_nickname(uintptr_t address) {
+    std::wstring wide;
+    if (!read_wide_string(reinterpret_cast<void*>(address), 64, wide) ||
+        wide.empty() || wide.size() >= 64) return {};
+    return revival_nickname_from_wide(wide);
+}
+
+static std::string read_revival_102j_mingw_wstring(uintptr_t objectAddress) {
+    // 1.02j uses the 32-bit libstdc++ basic_string<wchar_t> representation:
+    // data pointer at +0 and 32-bit length at +4. The pointer targets either
+    // the object's SSO buffer or its heap allocation.
+    Revival102jMinGwWstringHeader header{};
+    if (!safe_read(reinterpret_cast<void*>(objectAddress), header) ||
+        header.charsAddress == 0 || (header.charsAddress & 1u) != 0 ||
+        header.length <= 0 || header.length > 63) {
+        return {};
+    }
+
+    wchar_t buffer[64] = {};
+    const size_t byteCount = static_cast<size_t>(header.length) * sizeof(wchar_t);
+    if (!safe_read_bytes(reinterpret_cast<void*>(static_cast<uintptr_t>(header.charsAddress)), buffer, byteCount)) return {};
+    for (int32_t i = 0; i < header.length; ++i) {
+        if (buffer[i] == L'\0' || iswcntrl(buffer[i])) return {};
+    }
+    return revival_nickname_from_wide(std::wstring(buffer, buffer + header.length));
+}
+
+static bool read_revival_102j_snapshot(
+    uintptr_t revivalBase,
+    Revival102jSessionSnapshot& out) {
+    out = Revival102jSessionSnapshot{};
+    Revival102jSessionIdentity before{};
+    if (!read_revival_102j_identity(revivalBase, before)) return false;
+
+    Revival102jScorePair scores{};
+    bool scoresRead = false;
+    switch (before.kind) {
+        case Revival102jSessionKind::Rollback:
+            scoresRead = safe_read(
+                reinterpret_cast<void*>(before.session + REVIVAL_102J_ROLLBACK_P1_WINS_OFFSET), scores);
+            (void)safe_read(reinterpret_cast<void*>(before.session + REVIVAL_102J_ROLLBACK_SIDE_OFFSET), out.selfIndex);
+            if (out.selfIndex != 0 && out.selfIndex != 1) out.selfIndex = -1;
+            out.p1Nickname = read_revival_102j_inline_nickname(before.session + REVIVAL_102J_ROLLBACK_P1_NAME_OFFSET);
+            out.p2Nickname = read_revival_102j_inline_nickname(before.session + REVIVAL_102J_ROLLBACK_P2_NAME_OFFSET);
+            break;
+        case Revival102jSessionKind::Spectator:
+            scoresRead = safe_read(
+                reinterpret_cast<void*>(before.session + REVIVAL_102J_SPECTATOR_P1_WINS_OFFSET), scores);
+            out.p1Nickname = read_revival_102j_mingw_wstring(before.session + REVIVAL_102J_SPECTATOR_P1_NAME_OFFSET);
+            out.p2Nickname = read_revival_102j_mingw_wstring(before.session + REVIVAL_102J_SPECTATOR_P2_NAME_OFFSET);
+            break;
+        case Revival102jSessionKind::Compact:
+            scoresRead = safe_read(
+                reinterpret_cast<void*>(before.session + REVIVAL_102J_COMPACT_P1_WINS_OFFSET), scores);
+            break;
+        case Revival102jSessionKind::Replay:
+        case Revival102jSessionKind::Practice:
+            break;
+        default:
+            return false;
+    }
+
+    if (scoresRead && scores.p1 >= 0 && scores.p1 <= 99 && scores.p2 >= 0 && scores.p2 <= 99) {
+        out.p1Wins = scores.p1;
+        out.p2Wins = scores.p2;
+        out.scoresValid = true;
+    }
+
+    // Session objects can be destroyed/replaced during screen transitions.
+    // Accept the snapshot only if role, pointer, and vtable stayed unchanged
+    // across every field read.
+    Revival102jSessionIdentity after{};
+    if (!read_revival_102j_identity(revivalBase, after) ||
+        !same_revival_102j_identity(before, after)) {
+        efzda::log("[tick=%llu] REVIVAL102J discarded torn session snapshot", ticks());
+        return false;
+    }
+
+    out.identity = before;
+    out.valid = true;
+    return true;
+}
+
 static int read_current_player_index(uintptr_t revivalBase) {
     uintptr_t ptr = read_revival_ptr(revivalBase);
     if (!ptr) return -1;
@@ -706,6 +920,10 @@ enum class OnlineState : int { Netplay = 0, Spectating = 1, Offline = 2, Tournam
 
 static OnlineState read_online_state(uintptr_t revivalBase) {
     if (!revivalBase) return OnlineState::Unknown;
+    // 1.02j has a different MinGW session model and must never fall through
+    // to the legacy pointer chain below. Its role-aware state is resolved by
+    // read_revival_102j_snapshot() in GameStateProvider::get().
+    if (DetectEfzRevivalVersion() == EfzRevivalVersion::Revival102j) return OnlineState::Unknown;
     auto normalize = [](uint8_t x) -> OnlineState {
         switch (x) {
             case 0: return OnlineState::Netplay;
@@ -822,6 +1040,24 @@ struct NetplayExportState {
     uint8_t roundIndex = 0xFF;
     bool isRoundActive = false;
     uint16_t roundTimerFrames = 0xFFFF;
+    // Async hosting (v7) — only meaningful when hasAsyncHost is set.
+    bool hasAsyncHost = false;
+    bool asyncHostActive = false;
+    bool asyncHostMinimized = false;
+    bool asyncHostPeerFound = false;
+    bool asyncHostTimedOut = false;
+    uint16_t hostPort = 0;
+    // Extended network metrics (v7) — only meaningful when hasNetDetail is set.
+    bool hasNetDetail = false;
+    int32_t avgPingMs = -1;
+    int32_t minPingMs = -1;
+    int32_t maxPingMs = -1;
+    int32_t recommendedDelay = -1;
+    int32_t minDelay = -1;
+    int32_t maxDelay = -1;
+    // Connection endpoint (v7) — only meaningful when hasConnection is set.
+    bool hasConnection = false;
+    std::string connectionAddress;
     std::string localNickname;
     std::string p1Name;
     std::string p2Name;
@@ -1026,6 +1262,33 @@ static bool parse_netplay_export_state_v6(const unsigned char* base, uint32_t st
         out.isRoundActive = (typed.isRoundActive != 0);
         out.roundTimerFrames = typed.roundTimerFrames;
         out.hasMatchContext = true;
+    }
+    // --- v7 field groups. Each is valid only when (a) the struct is large
+    // enough to contain it (forward-compat) and (b) its capability bit is set
+    // (the source may drop the bit to 0 on ticks where the data is unavailable).
+    if (structSize >= offsetof(EFZNetplayState, hostPort) + sizeof(typed.hostPort) &&
+        (out.capabilityFlags & EFZ_CAP_ASYNC_HOST) != 0) {
+        out.hasAsyncHost = true;
+        out.asyncHostActive = (typed.asyncHostActive != 0);
+        out.asyncHostMinimized = (typed.asyncHostMinimized != 0);
+        out.asyncHostPeerFound = (typed.asyncHostPeerFound != 0);
+        out.asyncHostTimedOut = (typed.asyncHostTimedOut != 0);
+        out.hostPort = typed.hostPort;
+    }
+    if (structSize >= offsetof(EFZNetplayState, maxDelay) + sizeof(typed.maxDelay) &&
+        (out.capabilityFlags & EFZ_CAP_NET_DETAIL) != 0) {
+        out.hasNetDetail = true;
+        out.avgPingMs = typed.avgPingMs;
+        out.minPingMs = typed.minPingMs;
+        out.maxPingMs = typed.maxPingMs;
+        out.recommendedDelay = typed.recommendedDelay;
+        out.minDelay = typed.minDelay;
+        out.maxDelay = typed.maxDelay;
+    }
+    if (structSize >= offsetof(EFZNetplayState, connectionAddress) + sizeof(typed.connectionAddress) &&
+        (out.capabilityFlags & EFZ_CAP_CONNECTION) != 0) {
+        out.connectionAddress = sanitize_cstr(typed.connectionAddress, sizeof(typed.connectionAddress));
+        out.hasConnection = !out.connectionAddress.empty();
     }
     out.valid = true;
     return true;
@@ -1243,15 +1506,31 @@ static std::string format_netplay_menu_state(const NetplayExportState& state) {
     return out;
 }
 
-static const char* netplay_phase_name(int32_t phase) {
+static const char* netplay_phase_name(int32_t phase, int32_t mode)
+{
     switch (phase) {
-        case EFZ_PHASE_IDLE: return "Idle";
-        case EFZ_PHASE_CONNECTING: return "Connecting";
-        case EFZ_PHASE_DELAY_SETUP: return "Delay setup";
-        case EFZ_PHASE_CONNECTED: return "Connected";
-        case EFZ_PHASE_FAILED: return "Failed";
-        case EFZ_PHASE_SESSION_ENDED: return "Session ended";
-        default: return "Unknown";
+        case EFZ_PHASE_IDLE:
+            return "Idle";
+
+        case EFZ_PHASE_CONNECTING:
+            return mode == EFZ_SESSION_HOSTING
+                ? "Hosting"
+                : "Connecting";
+
+        case EFZ_PHASE_DELAY_SETUP:
+            return "Delay setup";
+
+        case EFZ_PHASE_CONNECTED:
+            return "Connected";
+
+        case EFZ_PHASE_FAILED:
+            return "Failed";
+
+        case EFZ_PHASE_SESSION_ENDED:
+            return "Session ended";
+
+        default:
+            return "Unknown";
     }
 }
 
@@ -1276,6 +1555,7 @@ static const char* netplay_activity_name(uint8_t activity) {
         case EFZ_ACTIVITY_LOADING: return "Loading";
         case EFZ_ACTIVITY_MATCH: return "Match";
         case EFZ_ACTIVITY_RESULTS: return "Results";
+        case EFZ_ACTIVITY_HOST_IDLE: return "Host idle";
         default: return "Unknown";
     }
 }
@@ -1427,7 +1707,28 @@ GameState GameStateProvider::get() {
     // Read game mode and online state
     uint8_t gmRaw = read_game_mode(efzBase);
     const char* gmName = game_mode_name(gmRaw);
-    OnlineState onl = read_online_state(revivalBase);
+    const EfzRevivalVersion revivalVersion = revivalBase
+        ? DetectEfzRevivalVersion()
+        : EfzRevivalVersion::Unknown;
+    const bool isRevival102j = revivalVersion == EfzRevivalVersion::Revival102j;
+    Revival102jSessionSnapshot revival102j{};
+    const bool haveRevival102jSnapshot =
+        isRevival102j && read_revival_102j_snapshot(revivalBase, revival102j);
+    OnlineState onl = OnlineState::Unknown;
+    if (isRevival102j) {
+        if (haveRevival102jSnapshot) {
+            switch (revival102j.identity.kind) {
+                case Revival102jSessionKind::Rollback: onl = OnlineState::Netplay; break;
+                case Revival102jSessionKind::Spectator: onl = OnlineState::Spectating; break;
+                case Revival102jSessionKind::Compact: onl = OnlineState::Tournament; break;
+                case Revival102jSessionKind::Replay:
+                case Revival102jSessionKind::Practice: onl = OnlineState::Offline; break;
+                default: break;
+            }
+        }
+    } else {
+        onl = read_online_state(revivalBase);
+    }
     NetplayExportState np{};
     bool haveNetplayExport = read_netplay_export_state(np);
     static bool s_lastNetplayExport = false;
@@ -1490,7 +1791,7 @@ GameState GameStateProvider::get() {
         if (!s_npTransitionKnown) {
             log("NPTransition: init mode=%s phase=%s activity=%s end=%s menu=%d/%u/%u charsel=%d match=%d sid=%u set=%u",
                 netplay_mode_name(np.sessionMode),
-                netplay_phase_name(np.sessionPhase),
+                netplay_phase_name(np.sessionPhase, np.sessionMode),
                 netplay_activity_name(np.activityPhase),
                 netplay_end_reason_name(np.endReason),
                 np.inNetplayMenu ? 1 : 0,
@@ -1517,7 +1818,8 @@ GameState GameStateProvider::get() {
             if (changed) {
                 log("NPTransition: mode %s -> %s | phase %s -> %s | activity %s -> %s | end %s -> %s | menu %d/%u/%u -> %d/%u/%u | charsel %d -> %d | match %d -> %d | sid %u -> %u | set %u -> %u",
                     netplay_mode_name(s_npLastMode), netplay_mode_name(np.sessionMode),
-                    netplay_phase_name(s_npLastPhase), netplay_phase_name(np.sessionPhase),
+                    netplay_phase_name(s_npLastPhase, s_npLastMode),
+                    netplay_phase_name(np.sessionPhase, np.sessionMode),
                     netplay_activity_name(s_npLastActivity), netplay_activity_name(np.activityPhase),
                     netplay_end_reason_name(s_npLastEndReason), netplay_end_reason_name(np.endReason),
                     s_npLastMenu ? 1 : 0, (unsigned)s_npLastMenuScreen, (unsigned)s_npLastMenuDetail,
@@ -1626,6 +1928,21 @@ GameState GameStateProvider::get() {
             (unsigned)np.stateSeq,
             (unsigned)np.sessionId,
             (unsigned)np.setId);
+        if (np.hasAsyncHost || np.hasNetDetail || np.hasConnection) {
+            log("GSPoll#%lu: netplay-v7(asyncHost=%d active=%d min=%d peer=%d timeout=%d port=%u | netDetail=%d avg=%d min=%d max=%d recDelay=%d delayRange=%d-%d | conn=%d addr='%s')",
+                s_poll,
+                np.hasAsyncHost ? 1 : 0,
+                np.asyncHostActive ? 1 : 0,
+                np.asyncHostMinimized ? 1 : 0,
+                np.asyncHostPeerFound ? 1 : 0,
+                np.asyncHostTimedOut ? 1 : 0,
+                (unsigned)np.hostPort,
+                np.hasNetDetail ? 1 : 0,
+                np.avgPingMs, np.minPingMs, np.maxPingMs,
+                np.recommendedDelay, np.minDelay, np.maxDelay,
+                np.hasConnection ? 1 : 0,
+                np.connectionAddress.c_str());
+        }
     } else {
         log("GSPoll#%lu: gameModeRaw=%u gameMode='%s' onlineState='%s'",
             s_poll, (unsigned)gmRaw, gmName ? gmName : "?", onlName ? onlName : "?");
@@ -1655,6 +1972,7 @@ GameState GameStateProvider::get() {
     bool inNetplayLoadingState = false;
     bool inNetplayMatchState = haveNetplayExport && np.inNetplayMatch;
     bool inNetplayResultsState = false;
+    bool inNetplayHostIdleState = false;
     bool useActivityPhase =
         haveNetplayExport &&
         np.hasActivityPhase &&
@@ -1669,6 +1987,7 @@ GameState GameStateProvider::get() {
         inNetplayLoadingState = false;
         inNetplayMatchState = false;
         inNetplayResultsState = false;
+        inNetplayHostIdleState = false;
         switch (np.activityPhase) {
             case EFZ_ACTIVITY_MENU: inNetplayMenuState = true; break;
             case EFZ_ACTIVITY_CONNECTING: inNetplayConnectingState = true; break;
@@ -1677,6 +1996,7 @@ GameState GameStateProvider::get() {
             case EFZ_ACTIVITY_LOADING: inNetplayLoadingState = true; break;
             case EFZ_ACTIVITY_MATCH: inNetplayMatchState = true; break;
             case EFZ_ACTIVITY_RESULTS: inNetplayResultsState = true; break;
+            case EFZ_ACTIVITY_HOST_IDLE: inNetplayHostIdleState = true; break;
             default: break;
         }
     }
@@ -1782,6 +2102,7 @@ GameState GameStateProvider::get() {
         inNetplayLoadingState = false;
         inNetplayMatchState = false;
         inNetplayResultsState = false;
+        inNetplayHostIdleState = false;
     }
 
     bool exportSnapshotResolved = false;
@@ -1819,16 +2140,28 @@ GameState GameStateProvider::get() {
             return;
         }
 
-        int revivalSelfIdx = read_current_player_index(revivalBase);
+        int revivalSelfIdx = -1;
+        if (isRevival102j) {
+            if (haveRevival102jSnapshot) revivalSelfIdx = revival102j.selfIndex;
+        } else {
+            revivalSelfIdx = read_current_player_index(revivalBase);
+        }
         if ((exportSelfIdx != 0 && exportSelfIdx != 1) && (revivalSelfIdx == 0 || revivalSelfIdx == 1)) {
             exportSelfIdx = revivalSelfIdx;
         }
 
-        if (exportP1Nick.empty()) {
-            exportP1Nick = read_nickname(revivalBase, NickP1Offset(), P1_NICKNAME_SPECTATOR_OFFSET);
-        }
-        if (exportP2Nick.empty()) {
-            exportP2Nick = read_nickname(revivalBase, NickP2Offset(), P2_NICKNAME_SPECTATOR_OFFSET);
+        if (isRevival102j) {
+            if (haveRevival102jSnapshot) {
+                if (exportP1Nick.empty()) exportP1Nick = revival102j.p1Nickname;
+                if (exportP2Nick.empty()) exportP2Nick = revival102j.p2Nickname;
+            }
+        } else {
+            if (exportP1Nick.empty()) {
+                exportP1Nick = read_nickname(revivalBase, NickP1Offset(), P1_NICKNAME_SPECTATOR_OFFSET);
+            }
+            if (exportP2Nick.empty()) {
+                exportP2Nick = read_nickname(revivalBase, NickP2Offset(), P2_NICKNAME_SPECTATOR_OFFSET);
+            }
         }
 
         bool inActiveFlowContext =
@@ -1844,15 +2177,29 @@ GameState GameStateProvider::get() {
         if (needWinsFallback) {
             int revP1Wins = 0;
             int revP2Wins = 0;
-            if (np.sessionMode == EFZ_SESSION_TOURNAMENT || onl == OnlineState::Tournament) {
+            bool revivalScoresAvailable = false;
+            if (isRevival102j) {
+                if (haveRevival102jSnapshot && revival102j.scoresValid) {
+                    revP1Wins = revival102j.p1Wins;
+                    revP2Wins = revival102j.p2Wins;
+                    revivalScoresAvailable = true;
+                }
+            } else if (np.sessionMode == EFZ_SESSION_TOURNAMENT || onl == OnlineState::Tournament) {
                 revP1Wins = read_win_count(revivalBase, TournP1WinOffset(), P1_WIN_COUNT_SPECTATOR_OFFSET);
                 revP2Wins = read_win_count(revivalBase, TournP2WinOffset(), P2_WIN_COUNT_SPECTATOR_OFFSET);
+                revivalScoresAvailable = true;
             } else {
                 revP1Wins = read_win_count(revivalBase, NetP1WinOffset(), P1_WIN_COUNT_SPECTATOR_OFFSET);
                 revP2Wins = read_win_count(revivalBase, NetP2WinOffset(), P2_WIN_COUNT_SPECTATOR_OFFSET);
+                revivalScoresAvailable = true;
             }
-            if ((exportP1Wins < 0 || exportP1Wins > 99 || exportP2Wins < 0 || exportP2Wins > 99) ||
-                ((exportP1Wins == 0 && exportP2Wins == 0) && (revP1Wins > 0 || revP2Wins > 0))) {
+            const bool exportScoresInvalid =
+                exportP1Wins < 0 || exportP1Wins > 99 ||
+                exportP2Wins < 0 || exportP2Wins > 99;
+            const bool revivalScoresAreNewer =
+                exportP1Wins == 0 && exportP2Wins == 0 &&
+                (revP1Wins > 0 || revP2Wins > 0);
+            if (revivalScoresAvailable && (exportScoresInvalid || revivalScoresAreNewer)) {
                 exportP1Wins = revP1Wins;
                 exportP2Wins = revP2Wins;
             }
@@ -1868,7 +2215,7 @@ GameState GameStateProvider::get() {
         std::string state = format_netplay_menu_state(np);
         if (np.sessionPhase != EFZ_PHASE_IDLE &&
             np.sessionPhase != EFZ_PHASE_CONNECTED) {
-            state += " (" + std::string(netplay_phase_name(np.sessionPhase)) + ")";
+            state += " (" + std::string(netplay_phase_name(np.sessionPhase, np.sessionMode)) + ")";
         }
         gs.state = state;
         gs.largeImageKey = "efz_icon";
@@ -1877,6 +2224,30 @@ GameState GameStateProvider::get() {
         gs.smallImageText.clear();
         s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw;
         log("GSPoll#%lu: netplay-menu -> details='%s' state='%s'", s_poll, gs.details.c_str(), gs.state.c_str());
+        return gs;
+    }
+
+    // Background ("async") hosting: a listener is alive while the local player
+    // keeps using EFZ normally. This is NOT a live match, so it gets its own
+    // short status instead of falling through to the connecting/phase wording
+    // (which would otherwise read "Connecting..." for a host that is merely
+    // waiting for an opponent).
+    if (inNetplayHostIdleState) {
+        std::string selfNick = !np.localNickname.empty() ? np.localNickname : std::string();
+        gs.details = selfNick.empty() ? "Hosting" : ("Hosting (" + selfNick + ")");
+        if (np.hasAsyncHost && np.asyncHostPeerFound) {
+            gs.state = "Opponent found...";
+        } else {
+            gs.state = "Waiting for the opponent...";
+        }
+        gs.largeImageKey = "efz_icon";
+        gs.largeImageText = "Hosting";
+        gs.smallImageKey.clear();
+        gs.smallImageText.clear();
+        s_lastP1Name = p1; s_lastP2Name = p2; s_lastGmRaw = gmRaw;
+        log("GSPoll#%lu: netplay-host-idle -> details='%s' state='%s' (peerFound=%d port=%u)",
+            s_poll, gs.details.c_str(), gs.state.c_str(),
+            np.asyncHostPeerFound ? 1 : 0, (unsigned)np.hostPort);
         return gs;
     }
 
@@ -2228,7 +2599,20 @@ GameState GameStateProvider::get() {
         log("GSPoll#%lu: using netplay export for scores/nicknames (mode=%d phase=%d side=%d p1=%d p2=%d)",
             s_poll, np.sessionMode, np.sessionPhase, selfIdx, p1Wins, p2Wins);
     } else if (onl == OnlineState::Netplay || onl == OnlineState::Spectating || onl == OnlineState::Tournament) {
-        if (onl == OnlineState::Tournament) {
+        if (isRevival102j) {
+            // The 1.02j snapshot was accepted only after role/vtable validation
+            // and a second identity read, so none of the legacy offsets are
+            // consulted for this build.
+            if (haveRevival102jSnapshot) {
+                if (revival102j.scoresValid) {
+                    p1Wins = revival102j.p1Wins;
+                    p2Wins = revival102j.p2Wins;
+                }
+                p1Nick = revival102j.p1Nickname;
+                p2Nick = revival102j.p2Nickname;
+                selfIdx = revival102j.selfIndex;
+            }
+        } else if (onl == OnlineState::Tournament) {
             // 1.02i appears to store tournament counters differently; prefer plausible pair between standard and tournament.
             EfzRevivalVersion ver = DetectEfzRevivalVersion();
             if (ver == EfzRevivalVersion::Revival102i) {
@@ -2285,9 +2669,11 @@ GameState GameStateProvider::get() {
                 }
             }
         }
-        p1Nick = read_nickname(revivalBase, NickP1Offset(), P1_NICKNAME_SPECTATOR_OFFSET);
-        p2Nick = read_nickname(revivalBase, NickP2Offset(), P2_NICKNAME_SPECTATOR_OFFSET);
-        selfIdx = read_current_player_index(revivalBase);
+        if (!isRevival102j) {
+            p1Nick = read_nickname(revivalBase, NickP1Offset(), P1_NICKNAME_SPECTATOR_OFFSET);
+            p2Nick = read_nickname(revivalBase, NickP2Offset(), P2_NICKNAME_SPECTATOR_OFFSET);
+            selfIdx = read_current_player_index(revivalBase);
+        }
     }
     if (p1Wins < 0 || p1Wins > 99) p1Wins = 0;
     if (p2Wins < 0 || p2Wins > 99) p2Wins = 0;
@@ -2296,7 +2682,14 @@ GameState GameStateProvider::get() {
     // Online nickname monitoring: if reported online but both nicknames are missing, keep monitoring
     if (onl == OnlineState::Netplay || onl == OnlineState::Spectating || onl == OnlineState::Tournament) {
         bool haveAnyNick = !p1Nick.empty() || !p2Nick.empty();
-        if (haveNetplayExport) {
+        if (isRevival102j &&
+            onl == OnlineState::Tournament &&
+            haveRevival102jSnapshot) {
+            // The verified 1.02j compact/tournament layout exposes scores but
+            // no approved nickname fields. Do not suppress valid tournament
+            // presence while waiting for data this layout cannot provide.
+            s_waitOnlineNicknames = false;
+        } else if (haveNetplayExport) {
             if (inNetplayMatchState) {
                 // During active match, avoid falling back to generic menu text
                 // just because nicknames have not populated yet.

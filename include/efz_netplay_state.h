@@ -4,7 +4,7 @@
 //
 // Shared between efz_netplay_mod and consumer mods (e.g., EFZRichPresence).
 //
-// The netplay mod creates a named shared memory block and populates it each
+// In-game Netplay creates a named shared memory block and populates it each
 // frame.  Consumer mods open the same block to read the latest state.
 //
 // Access methods (both operate in-process — all DLLs live inside EFZ.exe):
@@ -35,7 +35,7 @@ extern "C" {
 // Validation magic: 'EFZN' in little-endian byte order.
 #define EFZ_NETPLAY_STATE_MAGIC       0x4E5A4645u
 // Current struct layout version.  Increment when fields are added/changed.
-#define EFZ_NETPLAY_STATE_VERSION     6u
+#define EFZ_NETPLAY_STATE_VERSION     7u
 // Well-known name for the named shared memory block.
 #define EFZ_NETPLAY_STATE_SHM_NAME    "EFZNetplay_State"
 
@@ -56,6 +56,9 @@ extern "C" {
 #define EFZ_CAP_ACTIVITY      (1u << 7)  // activityPhase, endReason
 #define EFZ_CAP_CHAR_SELECT   (1u << 8)  // p1CharId, p2CharId, p1Locked, p2Locked, localCursorCharId
 #define EFZ_CAP_MATCH_CONTEXT (1u << 9)  // stageId, roundIndex, roundTimerFrames, isRoundActive
+#define EFZ_CAP_ASYNC_HOST    (1u << 10) // asyncHost* fields, hostPort  (v7)
+#define EFZ_CAP_NET_DETAIL    (1u << 11) // avg/min/max ping, recommended/min/max delay  (v7)
+#define EFZ_CAP_CONNECTION    (1u << 12) // connectionAddress  (v7)
 
 // ---------------------------------------------------------------------------
 // Session mode — mutually exclusive values describing the local player's role
@@ -99,6 +102,13 @@ enum EFZNetplayActivityPhase
     EFZ_ACTIVITY_LOADING        = 5,  // Post-charselect loading screen
     EFZ_ACTIVITY_MATCH          = 6,  // Active online match / round
     EFZ_ACTIVITY_RESULTS        = 7,  // Post-match results screen (reserved)
+    EFZ_ACTIVITY_HOST_IDLE      = 8,  // Hosting in the background while the local
+                                      // player uses EFZ normally (practice/menus).
+                                      // sessionMode stays EFZ_SESSION_HOSTING.
+                                      // Consumers should treat this as "netplay
+                                      // is engaged" but NOT a live match — e.g. a
+                                      // training mod can keep running instead of
+                                      // disabling, and need not suspend input.
 };
 
 // ---------------------------------------------------------------------------
@@ -165,7 +175,7 @@ enum EFZNetplayMenuDetail
 // Fixed-layout C struct for inter-mod state sharing.
 // All integers are naturally aligned; char arrays are ASCII / UTF-8.
 //
-// The struct is written atomically (memcpy under lock) by the netplay mod
+// The struct is written atomically (memcpy under lock) by In-game Netplay
 // and read by consumer mods via the shared memory mapping.
 // ---------------------------------------------------------------------------
 struct EFZNetplayState
@@ -261,6 +271,35 @@ struct EFZNetplayState
     uint8_t  _pad4;              // Alignment padding — reserved, must be 0
     uint16_t roundTimerFrames;   // Round timer in frames (0xFFFF = unknown)
     uint8_t  _pad5[2];          // Alignment padding — reserved, must be 0
+
+    // --- Async hosting (v7) ------------------------------------------------
+    // Populated when EFZ_CAP_ASYNC_HOST is set. Lets consumers know a host
+    // listener is alive even while the local player is on another screen
+    // (practice/menus) — i.e. activityPhase == EFZ_ACTIVITY_HOST_IDLE and
+    // sessionMode == EFZ_SESSION_HOSTING — so they can coexist instead of
+    // fully disabling. Distinct from a live match (inNetplayMatch).
+    uint8_t  asyncHostActive;     // Non-zero: async host listener engaged
+    uint8_t  asyncHostMinimized;  // Non-zero: hosting overlay minimized (local play)
+    uint8_t  asyncHostPeerFound;  // Non-zero: peer connected, prompt held for accept
+    uint8_t  asyncHostTimedOut;   // Non-zero: held prompt timed out (rehost offered)
+    uint16_t hostPort;            // Port we are hosting on (0 = n/a)
+    uint8_t  _pad6[2];           // Alignment padding — reserved, must be 0
+
+    // --- Extended network metrics (v7) -------------------------------------
+    // Populated when EFZ_CAP_NET_DETAIL is set (from the delay-prompt metrics).
+    // Sentinel -1 = unavailable.
+    int32_t  avgPingMs;          // Average ping (ms)
+    int32_t  minPingMs;          // Minimum ping (ms)
+    int32_t  maxPingMs;          // Maximum ping (ms)
+    int32_t  recommendedDelay;   // Revival-recommended input delay (frames)
+    int32_t  minDelay;           // Minimum selectable input delay (frames)
+    int32_t  maxDelay;           // Maximum selectable input delay (frames)
+
+    // --- Connection endpoint (v7) ------------------------------------------
+    // Populated when EFZ_CAP_CONNECTION is set. The remote/host endpoint for the
+    // current session: our public ip:port when hosting, the target when joining.
+    // Empty string when unavailable. UTF-8 / ASCII, null-terminated.
+    char     connectionAddress[64];
 };
 
 #ifdef __cplusplus
