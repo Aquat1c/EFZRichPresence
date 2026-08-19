@@ -1,0 +1,1 @@
+Temporary model artifact for the SQL training video transcription.
