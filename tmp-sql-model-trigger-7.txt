@@ -1,0 +1,1 @@
+Temporary GitHub Actions model fetch for offline transcription.
